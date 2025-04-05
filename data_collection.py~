@@ -1,0 +1,162 @@
+import os
+import json
+import time
+import requests
+import pandas as pd
+from datetime import datetime
+
+# Configuration
+API_KEY = 'f526c63ee48472002b1a2356ef05fcae'  # Replace with your LegiScan API key
+BASE_URL = 'https://api.legiscan.com/'
+STATE = 'ID'  # Idaho
+YEARS = range(2010, 2025)  # Five years: 2020–2024
+RAW_DIR = 'data/raw/'
+
+# Ensure base directory exists
+os.makedirs(RAW_DIR, exist_ok=True)
+
+def fetch_data(operation, params):
+    """Fetch data from LegiScan API with retry logic."""
+    params['key'] = API_KEY
+    response = requests.get(BASE_URL, params=params)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"Error fetching {operation}: {response.status_code}")
+        return None
+
+def save_json(data, path):
+    """Save data as JSON file."""
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def convert_to_csv(data, csv_path, columns):
+    """Convert JSON data to CSV with specified columns."""
+    df = pd.DataFrame(data)
+    if not df.empty:
+        df[columns].to_csv(csv_path, index=False)
+    else:
+        print(f"No data to save at {csv_path}")
+
+def get_session_list():
+    """Get list of sessions for Idaho over the past 5 years."""
+    params = {'op': 'getSessionList', 'state': STATE}
+    data = fetch_data('getSessionList', params)
+    if data and data['status'] == 'OK':
+        return [session for session in data['sessions'] if int(session['year_start']) in YEARS]
+    return []
+
+def collect_legislators():
+    """Fetch and save legislator data."""
+    params = {'op': 'getMasterList', 'state': STATE}
+    data = fetch_data('getMasterList', params)
+    if data and data['status'] == 'OK':
+        legislators = []
+        for bill in data['masterlist'].values():
+            if 'sponsors' in bill:
+                for sponsor in bill['sponsors']:
+                    legislators.append({
+                        'legislator_id': sponsor['people_id'],
+                        'name': sponsor['name'],
+                        'party': sponsor['party']
+                    })
+        # Remove duplicates
+        legislators = [dict(t) for t in {tuple(d.items()) for d in legislators}]
+        save_json(legislators, f'{RAW_DIR}legislators.json')
+        convert_to_csv(legislators, f'{RAW_DIR}legislators.csv', ['legislator_id', 'name', 'party'])
+
+def collect_bills_and_votes(session):
+    """Fetch and save bills and votes for a session."""
+    year = session['year_start']
+    session_id = session['session_id']
+    os.makedirs(f'{RAW_DIR}bills/{year}', exist_ok=True)
+    os.makedirs(f'{RAW_DIR}votes/{year}', exist_ok=True)
+
+    # Get bill list for the session
+    params = {'op': 'getMasterList', 'id': session_id}
+    data = fetch_data('getMasterList', params)
+    if data and data['status'] == 'OK':
+        bills = []
+        votes = []
+        for bill_id, bill_info in data['masterlist'].items():
+            if isinstance(bill_info, dict):  # Skip non-dict entries
+                bills.append({
+                    'bill_id': bill_info['bill_id'],
+                    'title': bill_info['title'],
+                    'summary': bill_info.get('description', '')
+                })
+
+                # Fetch detailed bill data for votes
+                bill_params = {'op': 'getBill', 'id': bill_id}
+                bill_data = fetch_data('getBill', bill_params)
+                if bill_data and bill_data['status'] == 'OK':
+                    bill = bill_data['bill']
+                    save_json(bill, f'{RAW_DIR}bills/{year}/{bill_id}.json')
+                    if 'votes' in bill:
+                        for vote in bill['votes']:
+                            votes.append({
+                                'bill_id': bill_id,
+                                'legislator_id': vote.get('people_id', ''),  # May need roll call details
+                                'vote': vote['vote_text'],
+                                'date': vote['date']
+                            })
+                            # Fetch roll call for detailed votes
+                            roll_params = {'op': 'getRollCall', 'id': vote['roll_call_id']}
+                            roll_data = fetch_data('getRollCall', roll_params)
+                            if roll_data and roll_data['status'] == 'OK':
+                                save_json(roll_data, f'{RAW_DIR}votes/{year}/{vote["roll_call_id"]}.json')
+                                for v in roll_data['roll_call']['votes']:
+                                    votes.append({
+                                        'bill_id': bill_id,
+                                        'legislator_id': v['people_id'],
+                                        'vote': v['vote_text'],
+                                        'date': vote['date']
+                                    })
+                time.sleep(1)  # Avoid rate limits
+
+        # Save aggregated data
+        save_json(bills, f'{RAW_DIR}bills/{year}/bills.json')
+        convert_to_csv(bills, f'{RAW_DIR}bills/{year}.csv', ['bill_id', 'title', 'summary'])
+        save_json(votes, f'{RAW_DIR}votes/{year}/votes.json')
+        convert_to_csv(votes, f'{RAW_DIR}votes/{year}.csv', ['bill_id', 'legislator_id', 'vote', 'date'])
+
+def collect_committee_memberships(session):
+    """Fetch and save committee memberships (approximated via bill sponsors)."""
+    year = session['year_start']
+    os.makedirs(f'{RAW_DIR}committee_memberships/{year}', exist_ok=True)
+
+    params = {'op': 'getMasterList', 'id': session['session_id']}
+    data = fetch_data('getMasterList', params)
+    if data and data['status'] == 'OK':
+        memberships = []
+        for bill in data['masterlist'].values():
+            if isinstance(bill, dict) and 'sponsors' in bill:
+                for sponsor in bill['sponsors']:
+                    if sponsor.get('committee_id'):  # Limited by API data availability
+                        memberships.append({
+                            'legislator_id': sponsor['people_id'],
+                            'committee': sponsor.get('committee_name', 'Unknown')
+                        })
+        save_json(memberships, f'{RAW_DIR}committee_memberships/{year}/memberships.json')
+        convert_to_csv(memberships, f'{RAW_DIR}committee_memberships/{year}.csv', ['legislator_id', 'committee'])
+
+def main():
+    print("Starting data collection...")
+    sessions = get_session_list()
+    if not sessions:
+        print("No sessions found for the specified years.")
+        return
+
+    # Collect legislators (single file for all years)
+    collect_legislators()
+
+    # Collect bills, votes, and committee memberships per session
+    for session in sessions:
+        print(f"Processing session {session['session_name']} ({session['year_start']})")
+        collect_bills_and_votes(session)
+        collect_committee_memberships(session)
+
+    print("Data collection complete.")
+
+if __name__ == "__main__":
+    main()
