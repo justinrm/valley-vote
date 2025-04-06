@@ -7,41 +7,52 @@ import argparse
 from datetime import datetime
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Iterable
-import re # Added for regex operations
+from typing import List, Dict, Any, Optional, Iterable, Union
+import re
 
 # Third-party imports
-# Requirements: pandas, requests, tenacity, tqdm, beautifulsoup4, thefuzz, python-Levenshtein
 import requests
 import pandas as pd
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 from tqdm import tqdm
 from bs4 import BeautifulSoup
 from thefuzz import process, fuzz
 
-# --- Project Imports ---
+# Local imports
 from .config import (
-    LEGISCAN_API_KEY, LEGISCAN_BASE_URL, LEGISCAN_MAX_RETRIES, LEGISCAN_DEFAULT_WAIT_SECONDS,
-    DEFAULT_YEARS_START, COMMITTEE_MEMBER_MATCH_THRESHOLD,
-    ID_HOUSE_COMMITTEES_URL, ID_SENATE_COMMITTEES_URL,
-    ID_COMMITTEE_HEADING_SELECTORS, ID_COMMITTEE_CONTENT_SELECTORS, # Import selectors
+    LEGISCAN_API_KEY,
+    LEGISCAN_BASE_URL,
+    LEGISCAN_MAX_RETRIES,
+    LEGISCAN_DEFAULT_WAIT_SECONDS,
+    DEFAULT_YEARS_START,
+    COMMITTEE_MEMBER_MATCH_THRESHOLD,
+    ID_HOUSE_COMMITTEES_URL,
+    ID_SENATE_COMMITTEES_URL,
+    ID_COMMITTEE_HEADING_SELECTORS,
+    ID_COMMITTEE_CONTENT_SELECTORS,
     DATA_COLLECTION_LOG_FILE
 )
 from .utils import (
-    setup_logging, save_json, convert_to_csv, fetch_page, load_json, clean_name # Use utils functions
+    setup_logging,
+    save_json,
+    convert_to_csv,
+    fetch_page,
+    load_json,
+    clean_name
 )
 
 # --- Configure Logging ---
-# Logger setup is expected to be done by the calling script (e.g., main.py)
-# Get logger instance for this module
 logger = logging.getLogger(Path(DATA_COLLECTION_LOG_FILE).stem)
 
 # --- Ensure API Key is Set ---
-# Check is also done in config.py, but good to have here too for clarity
 if not LEGISCAN_API_KEY:
     logger.critical("FATAL: LEGISCAN_API_KEY environment variable not set. API calls will fail.")
-    # Depending on setup, throwing an error might be better:
-    # raise ValueError("FATAL: LEGISCAN_API_KEY environment variable not set.")
 
 # --- Constants & Mappings (from API Manual/Observation) ---
 STATUS_CODES = {
@@ -51,6 +62,41 @@ STATUS_CODES = {
     14: 'Calendars', 15: 'Failed Vote', 16: 'Veto Override Pass', 17: 'Veto Override Fail'
     # Add more specific codes if observed or needed
 }
+
+# --- Finance Data Column Mappings ---
+# These maps are used by scrape_finance_idaho.py for standardizing column names
+FINANCE_COLUMN_MAPS = {
+    'contributions': {
+        'donor_name': ['donor name', 'contributor name', 'name', 'from', 'contributor'],
+        'contribution_date': ['date', 'contribution date', 'received date'],
+        'contribution_amount': ['amount', 'contribution amount', '$', 'receipt amount'],
+        'donor_address': ['address', 'donor address', 'contributor address', 'addr 1'],
+        'donor_city': ['city', 'donor city', 'contributor city'],
+        'donor_state': ['state', 'st', 'donor state', 'contributor state'],
+        'donor_zip': ['zip', 'zip code', 'donor zip', 'contributor zip'],
+        'donor_employer': ['employer', 'donor employer', 'contributor employer'],
+        'donor_occupation': ['occupation', 'donor occupation', 'contributor occupation'],
+        'contribution_type': ['type', 'contribution type', 'receipt type'],
+        'committee_name': ['committee name', 'recipient committee', 'filer name'],
+        'report_name': ['report name', 'report title', 'report'],
+        'transaction_id': ['transaction id', 'tran id', 'transactionid']
+    },
+    'expenditures': {
+        'expenditure_date': ['date', 'expenditure date', 'payment date'],
+        'payee_name': ['payee', 'paid to', 'name', 'payee name', 'vendor name'],
+        'expenditure_amount': ['amount', 'expenditure amount', '$', 'payment amount'],
+        'expenditure_purpose': ['purpose', 'description', 'expenditure purpose', 'memo'],
+        'payee_address': ['address', 'payee address', 'vendor address', 'addr 1'],
+        'payee_city': ['city', 'payee city', 'vendor city'],
+        'payee_state': ['state', 'st', 'payee state', 'vendor state'],
+        'payee_zip': ['zip', 'zip code', 'payee zip', 'vendor zip'],
+        'expenditure_type': ['type', 'expenditure type', 'payment type', 'expenditure code'],
+        'committee_name': ['committee name', 'paying committee', 'filer name'],
+        'report_name': ['report name', 'report title', 'report'],
+        'transaction_id': ['transaction id', 'tran id', 'transactionid']
+    }
+}
+
 VOTE_TEXT_MAP = {
     'yea': 1, 'aye': 1, 'yes': 1, 'pass': 1, 'y': 1,
     'nay': 0, 'no': 0, 'fail': 0, 'n': 0,
@@ -1578,8 +1624,8 @@ if __name__ == "__main__":
     # --- Validate API Key for API-dependent actions ---
     api_actions = ['sessions', 'legislators', 'committees', 'bills', 'consolidate_api']
     if args.run in api_actions and not LEGISCAN_API_KEY:
-         test_logger.critical("LEGISCAN_API_KEY not set. Cannot run API-dependent actions. Exiting.")
-         sys.exit(1)
+        test_logger.critical("LEGISCAN_API_KEY not set. Cannot run API-dependent actions. Exiting.")
+        sys.exit(1)
 
     test_logger.info(f"--- Running data_collection.py standalone for {args.state} ({args.start_year}-{args.end_year}) ---")
     test_logger.info(f"Action requested: {args.run}")
@@ -1591,14 +1637,14 @@ if __name__ == "__main__":
     # Exclude actions that don't need session list first
     if args.run not in ['scrape_members', 'match_members', 'consolidate_members']:
         sessions = get_session_list(args.state, years, paths)
-        if not sessions and args.run != 'sessions': # Allow 'sessions' run to finish if none found
+        if not sessions and args.run != 'sessions':  # Allow 'sessions' run to finish if none found
             test_logger.error("No relevant sessions found via API. Halting API-dependent actions.")
             sys.exit(1)
         if args.run == 'sessions':
-             test_logger.info(f"Fetched {len(sessions)} sessions.")
-             # Exit after fetching sessions if that was the only action requested
-             logging.shutdown()
-             sys.exit(0)
+            test_logger.info(f"Fetched {len(sessions)} sessions.")
+            # Exit after fetching sessions if that was the only action requested
+            logging.shutdown()
+            sys.exit(0)
 
     # Execute specific actions based on --run argument
     try:
@@ -1606,8 +1652,8 @@ if __name__ == "__main__":
             collect_legislators(args.state, sessions, paths)
 
         elif args.run == 'committees':
-             for session in sessions:
-                 collect_committee_definitions(session, paths)
+            for session in sessions:
+                collect_committee_definitions(session, paths)
 
         elif args.run == 'bills':
             for session in sessions:
@@ -1619,12 +1665,9 @@ if __name__ == "__main__":
             bill_cols = ['bill_id', 'change_hash', 'session_id', 'year', 'state', 'state_id', 'url', 'state_link', 'number', 'type', 'type_id', 'body', 'body_id', 'current_body', 'current_body_id', 'title', 'description', 'status', 'status_desc', 'status_date', 'pending_committee_id', 'subjects', 'subject_ids', 'sast_relations', 'text_stubs', 'amendment_stubs', 'supplement_stubs']
             sponsor_cols = ['bill_id', 'legislator_id', 'sponsor_type_id', 'sponsor_type', 'sponsor_order', 'committee_sponsor', 'committee_id', 'session_id', 'year']
             vote_cols = ['vote_id', 'bill_id', 'legislator_id', 'vote_id_type', 'vote_text', 'vote_value', 'date', 'description', 'yea', 'nay', 'nv', 'absent', 'total', 'passed', 'chamber', 'chamber_id', 'session_id', 'year']
-            legislator_cols = ['legislator_id', 'person_hash', 'name', 'first_name', 'middle_name', 'last_name','suffix', 'nickname', 'party_id', 'party', 'role_id', 'role','district', 'state_id', 'state', 'active', 'committee_sponsor', 'committee_id','ftm_eid', 'votesmart_id', 'opensecrets_id', 'knowwho_pid', 'ballotpedia','state_link', 'legiscan_url']
+            legislator_cols = ['legislator_id', 'person_hash', 'name', 'first_name', 'middle_name', 'last_name', 'suffix', 'nickname', 'party_id', 'party', 'role_id', 'role', 'district', 'state_id', 'state', 'active', 'committee_sponsor', 'committee_id', 'ftm_eid', 'votesmart_id', 'opensecrets_id', 'knowwho_pid', 'ballotpedia', 'state_link', 'legiscan_url']
 
             test_logger.info("Consolidating yearly API data...")
-            # Consolidate legislators first if not done yet - assumes collect_legislators ran before or exists
-            # Might be better to consolidate within collect_legislators? For now, separate.
-            # consolidate_yearly_data('legislators', years, legislator_cols, args.state, paths)
             consolidate_yearly_data('committees', years, committee_cols, args.state, paths)
             consolidate_yearly_data('bills', years, bill_cols, args.state, paths)
             consolidate_yearly_data('sponsors', years, sponsor_cols, args.state, paths)
@@ -1634,657 +1677,46 @@ if __name__ == "__main__":
             # Note: This scrapes only the *current* year, regardless of args.start/end_year
             scraped_file = scrape_committee_memberships(args.state, paths)
             if scraped_file:
-                 test_logger.info(f"Scraped memberships raw file created: {scraped_file}")
+                test_logger.info(f"Scraped memberships raw file created: {scraped_file}")
             else:
-                 test_logger.error("Membership scraping failed or produced no output.")
-                 sys.exit(1) # Exit with error if scraping failed
+                test_logger.error("Membership scraping failed or produced no output.")
+                sys.exit(1)  # Exit with error if scraping failed
 
         elif args.run == 'match_members':
-             # Assumes scraping ran previously or file exists for the *current* year
-             current_year = datetime.now().year
-             scraped_file_path = paths['raw_committee_memberships'] / str(current_year) / f'scraped_memberships_raw_{args.state}_{current_year}.json'
-             # Assumes legislators were collected and consolidated
-             leg_file_path = paths['raw_legislators'] / f'all_legislators_{args.state}.json'
-             # Output path for the matched CSV
-             output_csv_path = paths['processed'] / f'committee_memberships_scraped_matched_{args.state}_{current_year}.csv'
+            # Assumes scraping ran previously or file exists for the *current* year
+            current_year = datetime.now().year
+            scraped_file_path = paths['raw_committee_memberships'] / str(current_year) / f'scraped_memberships_raw_{args.state}_{current_year}.json'
+            # Assumes legislators were collected and consolidated
+            leg_file_path = paths['raw_legislators'] / f'all_legislators_{args.state}.json'
+            # Output path for the matched CSV
+            output_csv_path = paths['processed'] / f'committee_memberships_scraped_matched_{args.state}_{current_year}.csv'
 
-             if not leg_file_path.exists():
-                  test_logger.error(f"Legislator file needed for matching not found: {leg_file_path}. Run legislator collection first.")
-                  sys.exit(1)
-             if not scraped_file_path.exists():
-                  test_logger.error(f"Raw scraped membership file not found: {scraped_file_path}. Run scraping first.")
-                  sys.exit(1)
+            if not leg_file_path.exists():
+                test_logger.error(f"Legislator file needed for matching not found: {leg_file_path}. Run legislator collection first.")
+                sys.exit(1)
+            if not scraped_file_path.exists():
+                test_logger.error(f"Raw scraped membership file not found: {scraped_file_path}. Run scraping first.")
+                sys.exit(1)
 
-             success = match_scraped_legislators(scraped_file_path, leg_file_path, output_csv_path, paths)
-             if not success:
-                 test_logger.error("Membership matching failed.")
-                 sys.exit(1)
+            success = match_scraped_legislators(scraped_file_path, leg_file_path, output_csv_path, paths)
+            if not success:
+                test_logger.error("Membership matching failed.")
+                sys.exit(1)
 
         elif args.run == 'consolidate_members':
-             # Consolidates matched membership data across the specified year range
-             test_logger.info("Consolidating matched scraped membership data...")
-             consolidate_membership_data(years, args.state, paths)
+            # Consolidates matched membership data across the specified year range
+            test_logger.info("Consolidating matched scraped membership data...")
+            consolidate_membership_data(years, args.state, paths)
 
-    except APIRateLimitError:
-         test_logger.critical("Halting run due to LegiScan API Rate Limit Error.")
-         sys.exit(2) # Exit with a specific code for rate limit
+    except APIRateLimitError as e:
+        test_logger.critical(f"Halting run due to rate limit: {e}")
+        sys.exit(2)  # Exit with a specific code for rate limit
     except ScrapingStructureError as e:
         test_logger.critical(f"Halting run due to Scraping Structure Error: {e}")
-        sys.exit(3) # Exit with specific code for scraping structure failure
+        sys.exit(3)  # Exit with specific code for scraping structure failure
     except Exception as e:
-         test_logger.critical(f"An unexpected error occurred during execution: {e}", exc_info=True)
-         sys.exit(1) # General error exit code
-
+        test_logger.critical(f"An unexpected error occurred during execution: {e}", exc_info=True)
+        sys.exit(1)  # General error exit code
 
     test_logger.info(f"--- Standalone run for action '{args.run}' finished. ---")
-    logging.shutdown() # Ensure logs are flushed before exit
-```
-
----
-
-**6. `src/scrape_finance_idaho.py` (Completed)**
-
-This includes the implemented (but needs testing/verification) `search_for_finance_data_link` function.
-
-```python
-#!/usr/bin/env python3
-"""Scrape campaign finance data from Idaho SOS Sunshine Portal."""
-import argparse
-import csv
-import json
-import re
-import time
-import random
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
-import io # For reading content directly
-
-import requests # Need requests here
-import pandas as pd
-from bs4 import BeautifulSoup
-from tqdm import tqdm
-from urllib.parse import urljoin, urlparse, parse_qs
-
-# --- Project Imports ---
-from .config import (
-    ID_FINANCE_BASE_URL, ID_FINANCE_SEARCH_PATH, ID_FINANCE_DOWNLOAD_WAIT_SECONDS,
-    FINANCE_SCRAPE_LOG_FILE
-)
-from .utils import setup_logging, save_json, convert_to_csv, fetch_page, setup_project_paths # fetch_page NOT used directly for POST logic below
-
-# --- Configure Logging ---
-# Logger setup expected from calling script (e.g., main.py)
-logger = logging.getLogger(Path(FINANCE_SCRAPE_LOG_FILE).stem)
-
-# --- Constants ---
-# Column maps for standardization
-CONTRIBUTION_COLUMN_MAP = {
-    'donor_name': ['donor name', 'contributor name', 'name', 'from', 'contributor'],
-    'contribution_date': ['date', 'contribution date', 'received date'],
-    'contribution_amount': ['amount', 'contribution amount', '$', 'receipt amount'],
-    'donor_address': ['address', 'donor address', 'contributor address', 'addr 1'],
-    'donor_city': ['city', 'donor city', 'contributor city'],
-    'donor_state': ['state', 'st', 'donor state', 'contributor state'],
-    'donor_zip': ['zip', 'zip code', 'donor zip', 'contributor zip'],
-    'donor_employer': ['employer', 'donor employer', 'contributor employer'],
-    'donor_occupation': ['occupation', 'donor occupation', 'contributor occupation'],
-    'contribution_type': ['type', 'contribution type', 'receipt type'],
-    'committee_name': ['committee name', 'recipient committee', 'filer name'], # Often the committee being searched for
-    'report_name': ['report name', 'report title', 'report'],
-    'transaction_id': ['transaction id', 'tran id', 'transactionid']
-}
-EXPENDITURE_COLUMN_MAP = {
-    'expenditure_date': ['date', 'expenditure date', 'payment date'],
-    'payee_name': ['payee', 'paid to', 'name', 'payee name', 'vendor name'],
-    'expenditure_amount': ['amount', 'expenditure amount', '$', 'payment amount'],
-    'expenditure_purpose': ['purpose', 'description', 'expenditure purpose', 'memo'],
-    'payee_address': ['address', 'payee address', 'vendor address', 'addr 1'],
-    'payee_city': ['city', 'payee city', 'vendor city'],
-    'payee_state': ['state', 'st', 'payee state', 'vendor state'],
-    'payee_zip': ['zip', 'zip code', 'payee zip', 'vendor zip'],
-    'expenditure_type': ['type', 'expenditure type', 'payment type', 'expenditure code'],
-    'committee_name': ['committee name', 'paying committee', 'filer name'], # Often the committee being searched for
-    'report_name': ['report name', 'report title', 'report'],
-    'transaction_id': ['transaction id', 'tran id', 'transactionid']
-}
-
-# --- Helper Functions ---
-def standardize_columns(df: pd.DataFrame, column_map: Dict[str, List[str]]) -> pd.DataFrame:
-    """Standardizes DataFrame columns based on a mapping."""
-    df.columns = df.columns.str.lower().str.strip().str.replace(':', '') # Clean column names
-    rename_dict = {}
-    found_standard_names = set()
-
-    for standard_name, variations in column_map.items():
-        for var in variations:
-            if var in df.columns:
-                if standard_name not in found_standard_names:
-                    rename_dict[var] = standard_name
-                    found_standard_names.add(standard_name)
-                    logger.debug(f"Mapping column '{var}' to '{standard_name}'")
-                    break # Use first matching variation
-            # else: logger.debug(f"Variation '{var}' not found in columns: {df.columns.tolist()}")
-
-    original_cols = set(df.columns)
-    mapped_source_cols = set(rename_dict.keys())
-    unmapped_cols = original_cols - mapped_source_cols
-    if unmapped_cols:
-         logger.warning(f"Unmapped columns found: {list(unmapped_cols)}. Check column_map or source data.")
-
-    df = df.rename(columns=rename_dict)
-    for standard_name in column_map.keys():
-        if standard_name not in df.columns:
-            df[standard_name] = pd.NA
-            logger.debug(f"Added missing standard column: '{standard_name}'")
-
-    final_columns = list(column_map.keys())
-    # Return only the standard columns that exist in the dataframe after mapping/adding
-    return df[[col for col in final_columns if col in df.columns]]
-
-# --- Website Interaction & Parsing Functions ---
-
-def get_hidden_form_fields(soup: BeautifulSoup) -> Dict[str, str]:
-    """Extracts hidden input fields commonly used in ASP.NET forms."""
-    fields = {}
-    # Be more specific to find the main form if multiple exist
-    main_form = soup.find('form', id=re.compile("form", re.I)) # Common ID for main form
-    if not main_form:
-         main_form = soup.find('form') # Fallback to first form
-         if not main_form:
-              logger.warning("Could not find <form> tag on page.")
-              return {}
-
-    hidden_inputs = main_form.find_all('input', {'type': 'hidden'})
-    for input_tag in hidden_inputs:
-        name = input_tag.get('name')
-        value = input_tag.get('value', '') # Default to empty string
-        if name:
-            # Prioritize known ASP.NET state fields
-            if name in ['__VIEWSTATE', '__VIEWSTATEGENERATOR', '__EVENTVALIDATION']:
-                 fields[name] = value
-            # Consider other hidden fields if needed, but be cautious
-            # elif name.startswith('ctl00$'): fields[name] = value
-            else:
-                 logger.debug(f"Ignoring potentially irrelevant hidden field: {name}")
-
-    logger.debug(f"Extracted hidden fields: {list(fields.keys())}")
-    if '__VIEWSTATE' not in fields: logger.warning("ViewState hidden field ('__VIEWSTATE') not found, form submission might fail.")
-    return fields
-
-def find_export_link(soup: BeautifulSoup, data_type: str) -> Optional[str]:
-    """Finds the CSV/Excel export link/button in the search results HTML."""
-    # --- THIS REQUIRES INSPECTION OF THE ACTUAL SEARCH RESULTS PAGE ---
-    # Common patterns: Link (<a>), Button (<input>/<button>), JavaScript
-    logger.debug(f"Searching results page for '{data_type}' export link/button...")
-    export_link = None
-
-    # Pattern 1: Direct Link (Prioritize CSV)
-    # Look for specific IDs or attributes if possible, otherwise use regex on text/title/href
-    # Example Selectors (ADJUST THESE BASED ON INSPECTION):
-    possible_links = soup.select('a[id*="Export"], a[id*="Download"], a[title*="Export"], a[title*="Download"]')
-    if not possible_links:
-         possible_links = soup.find_all('a', string=re.compile(r'\b(Export|Download|CSV|Excel)\b', re.I))
-
-    csv_link = None
-    excel_link = None
-    for link in possible_links:
-        href = link.get('href')
-        if not href: continue
-        link_text = link.get_text(strip=True).lower()
-        href_lower = href.lower()
-
-        # Check for CSV indicators
-        if 'csv' in link_text or 'format=csv' in href_lower or '.csv' in href_lower:
-             csv_link = href
-             logger.info(f"Found potential CSV export link: {href}")
-             break # Found preferred format, stop searching links
-        # Check for Excel indicators (only if CSV not found yet)
-        elif not csv_link and ('excel' in link_text or 'xls' in link_text or 'format=xls' in href_lower or '.xls' in href_lower):
-             excel_link = href
-             logger.info(f"Found potential Excel export link: {href}")
-             # Continue searching in case a CSV link appears later
-
-    export_link = csv_link or excel_link # Prioritize CSV
-
-    # Pattern 2: Submit Button (More Complex - Requires knowing button's name/value)
-    if not export_link:
-        # Example Selectors (ADJUST THESE BASED ON INSPECTION):
-        possible_buttons = soup.select('input[type="submit"][value*="Export"], input[type="submit"][value*="Download"], button[id*="Export"], button[id*="Download"]')
-        if not possible_buttons:
-             possible_buttons = soup.find_all(['input', 'button'], string=re.compile(r'\b(Export|Download|CSV|Excel)\b', re.I))
-
-        for button in possible_buttons:
-             button_name = button.get('name')
-             button_value = button.get('value', button.get_text(strip=True))
-             # This indicates the download might require another POST, including this button's name/value.
-             # Handling this requires modifying the POST logic significantly.
-             logger.warning(f"Found potential export BUTTON: Name='{button_name}', Value/Text='{button_value}'.")
-             logger.warning("Download via button click is not implemented. Requires specific handling.")
-             # Cannot return a simple link here. Set export_link to None or a special value?
-             export_link = None # Indicate link not found if only button exists
-
-    # Pattern 3: JavaScript (Generally requires browser automation - Selenium/Playwright)
-    if not export_link:
-         js_triggers = soup.find_all(onclick=re.compile(r'export|download|csv|excel', re.I))
-         if js_triggers:
-              logger.warning(f"Found potential JavaScript export triggers: {[tag.get('onclick') for tag in js_triggers[:3]]}. Cannot handle with requests.")
-              export_link = None
-
-    # Final processing of found link
-    if export_link:
-        # Ensure the link is absolute, joining with the base URL if relative
-        absolute_link = urljoin(ID_FINANCE_BASE_URL, export_link)
-        logger.info(f"Resolved export URL: {absolute_link}")
-        return absolute_link
-    else:
-        logger.warning(f"Could not find unambiguous download link/button for '{data_type}' on results page.")
-        return None
-
-
-def search_for_finance_data_link(search_term: str, year: int, data_type: str) -> Optional[str]:
-    """
-    Searches the Idaho Sunshine Portal for a finance data download link.
-    Handles ASP.NET form submission with ViewState.
-
-    Args:
-        search_term: Name of legislator or committee.
-        year: Election year or reporting year.
-        data_type: 'contributions' or 'expenditures'.
-
-    Returns:
-        Absolute URL string for the download link, or None if not found or error.
-    """
-    search_page_url = urljoin(ID_FINANCE_BASE_URL, ID_FINANCE_SEARCH_PATH)
-    logger.info(f"Initiating finance search: Term='{search_term}', Year={year}, Type={data_type}")
-
-    # Use a session object to persist cookies across requests
-    session = requests.Session()
-    session.headers.update({ # Base headers, fetch_page might add more specific ones
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Referer': ID_FINANCE_BASE_URL, # Often important
-    })
-
-    try:
-        # --- Step 1: Initial GET to load the search page ---
-        logger.debug(f"Fetching initial search page to get form state: {search_page_url}")
-        # Use requests directly for session handling
-        initial_response = session.get(search_page_url, timeout=40, allow_redirects=True)
-        initial_response.raise_for_status() # Check for immediate errors loading page
-        logger.debug(f"Initial GET successful (Status: {initial_response.status_code})")
-
-        initial_soup = BeautifulSoup(initial_response.text, 'html.parser')
-        hidden_fields = get_hidden_form_fields(initial_soup)
-        if not hidden_fields or '__VIEWSTATE' not in hidden_fields:
-            logger.error("Could not extract necessary hidden form fields (__VIEWSTATE) from search page. Cannot submit search.")
-            return None
-
-        # --- Step 2: Construct the POST data payload ---
-        # Field names below are GUESSES based on common ASP.NET patterns and need VERIFICATION
-        # Inspect the <form> element and its <input>, <select> tags in browser dev tools.
-        form_data = hidden_fields.copy() # Start with ViewState etc.
-
-        # --- VERIFY THESE FIELD NAMES ---
-        # Candidate/Committee Name Input: Look for <input type="text" name="....txtName...">
-        form_data['ctl00$DefaultContent$CampaignSearch$txtName'] = search_term
-        # Year Input: Look for <input type="text" name="....txtYear..."> or <select name="....ddlYear...">
-        form_data['ctl00$DefaultContent$CampaignSearch$txtYear'] = str(year)
-        # Search Type (Candidate/Committee): Look for <input type="radio" name="....SearchType..."> or dropdown
-        # form_data['ctl00$DefaultContent$CampaignSearch$SearchType'] = 'Candidate' # Example, adjust if needed
-        # Search Button: Look for <input type="submit" name="....btnSearch..." value="Search">
-        form_data['ctl00$DefaultContent$CampaignSearch$btnSearch'] = 'Search' # Use the 'value' attribute
-
-        # Data Type Selection (Contributions/Expenditures): This might be selected *after* the initial search results.
-        # If so, this function needs to find the link/button for the *specific data type* on the results page.
-        # For now, assume the initial search leads to a page containing links for both.
-
-        logger.debug(f"Constructed POST data (ViewState and key fields): {{'__VIEWSTATE': '...', 'txtName': '{search_term}', 'txtYear': '{year}', 'btnSearch': 'Search'}}")
-
-        # --- Step 3: Make the POST request ---
-        logger.info(f"Submitting search POST request to {search_page_url}...")
-        post_response = session.post(
-            search_page_url,
-            data=form_data,
-            timeout=60, # Longer timeout for search submission
-            allow_redirects=True,
-             headers={'Referer': search_page_url} # Explicitly set Referer for POST
-        )
-        post_response.raise_for_status() # Check for errors during POST
-        logger.debug(f"Search POST request successful (Status: {post_response.status_code})")
-
-        # Check final URL after potential redirects
-        final_url = post_response.url
-        logger.debug(f"Final URL after POST: {final_url}")
-        # Optional: Check if URL indicates an error page?
-
-        # --- Step 4: Parse the response HTML for the download link ---
-        results_soup = BeautifulSoup(post_response.text, 'html.parser')
-
-        # Check for explicit error messages
-        # Look for common ASP.NET validation summary controls or specific error divs
-        error_div = results_soup.find('div', id=re.compile("ValidationSummary|error", re.I))
-        if error_div:
-            error_text = error_div.get_text(" ", strip=True)
-            if "no records found" in error_text.lower():
-                 logger.info(f"Search successful but returned 'No Records Found' for '{search_term}', {year}.")
-                 return None # Valid search, but no data
-            else:
-                 logger.warning(f"Found error/validation message on results page: {error_text[:200]}...")
-                 # Continue trying to find link, might be unrelated error
-
-        # Attempt to find the specific export link (CSV preferred)
-        export_url = find_export_link(results_soup, data_type)
-
-        if export_url:
-             logger.info(f"Successfully found export URL for {data_type}: {export_url}")
-             return export_url
-        else:
-             # Save the search results HTML for debugging if link not found
-             debug_path = paths['artifacts'] / 'debug' # Use 'artifacts' dir
-             debug_path.mkdir(parents=True, exist_ok=True)
-             safe_term = "".join(c if c.isalnum() else '_' for c in search_term)[:50]
-             debug_file = debug_path / f"search_results_{safe_term}_{year}_{data_type}_{time.strftime('%Y%m%d%H%M%S')}.html"
-             try:
-                  debug_file.write_text(post_response.text, encoding='utf-8', errors='replace')
-                  logger.warning(f"Saved search results HTML (link not found) for debugging to: {debug_file}")
-             except Exception as e_save:
-                  logger.error(f"Failed to save debug HTML: {e_save}")
-             return None
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error during finance search for '{search_term}' ({year}, {data_type}): {e}", exc_info=False) # Less verbose logging for network errors
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error during finance search for '{search_term}' ({year}, {data_type}): {e}", exc_info=True)
-        return None
-
-
-# --- Data Downloading and Processing ---
-def download_and_extract_finance_data(
-    download_url: str,
-    source_search_term: str, # e.g., legislator name used in search
-    search_year: int,
-    data_type: str, # 'contributions' or 'expenditures'
-    paths: Dict[str, Path]
-) -> Optional[pd.DataFrame]:
-    """Downloads, processes, and standardizes finance data (CSV assumed)."""
-    logger.info(f"Attempting download: Type='{data_type}', Term='{source_search_term}', Year={search_year}")
-    logger.debug(f"Download URL: {download_url}")
-
-    # Use utils.fetch_page to get the content (returns string)
-    # If Excel is possible, might need fetch_page(..., return_bytes=True) and Excel reading logic
-    file_content = fetch_page(download_url, timeout=90) # Longer timeout for downloads
-
-    if file_content is None: # Check if fetch_page failed
-        logger.error(f"Failed to download content from {download_url} after retries.")
-        return None
-    if len(file_content) < 50: # Check for suspiciously small files
-        logger.warning(f"Downloaded file from {download_url} is very small ({len(file_content)} chars). May be empty or an error page.")
-        # Check if it looks like HTML (potential error page)
-        if file_content.strip().lower().startswith(('<!doctype html', '<html')):
-             logger.error(f"Downloaded content appears to be HTML, not data. URL: {download_url}")
-             # Save HTML error page for debugging?
-             error_html_path = paths['artifacts'] / 'debug' / f"download_error_{datetime.now().strftime('%Y%m%d%H%M%S')}.html"
-             error_html_path.parent.mkdir(parents=True, exist_ok=True)
-             try: error_html_path.write_text(file_content, encoding='utf-8', errors='replace')
-             except Exception as e_save: logger.error(f"Failed to save error HTML: {e_save}")
-             return None
-
-    # Define raw file path within state/year structure
-    raw_dir = paths['raw_campaign_finance'] / 'idaho' / str(search_year)
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    safe_search_term = "".join(c if c.isalnum() else '_' for c in source_search_term)[:50]
-    # Include timestamp in raw filename to prevent overwrites
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    # Assume CSV extension for now, could check Content-Type header if available
-    raw_path = raw_dir / f"{data_type}_{safe_search_term}_{search_year}_{timestamp}.raw.csv"
-
-    # Save raw content before processing
-    try:
-        raw_path.write_text(file_content, encoding='utf-8', errors='replace')
-        logger.info(f"Saved raw downloaded content to {raw_path}")
-    except Exception as e:
-        logger.error(f"Error saving raw content to {raw_path}: {e}")
-        # Don't necessarily stop, try processing anyway
-
-    # Attempt to process the data as CSV using pandas
-    df = None
-    try:
-        # Use io.StringIO to read the string content as a file object
-        csv_file = io.StringIO(file_content)
-        # Try reading CSV, be robust to common issues
-        df = pd.read_csv(
-            csv_file,
-            encoding='utf-8',
-            low_memory=False, # Helps with mixed types
-            on_bad_lines='warn', # Log problematic lines instead of failing
-            # quoting=csv.QUOTE_MINIMAL, # Might help if quoting is inconsistent
-            # escapechar='\\' # If escape characters are used
-        )
-        logger.debug(f"Successfully read CSV data using utf-8 for {raw_path.name}")
-    except (pd.errors.ParserError, UnicodeDecodeError, Exception) as e_utf8:
-        logger.warning(f"UTF-8 CSV parsing failed for {raw_path.name}: {e_utf8}. Trying latin-1...")
-        try:
-            csv_file = io.StringIO(file_content) # Reset buffer position might be needed
-            df = pd.read_csv(csv_file, encoding='latin-1', low_memory=False, on_bad_lines='warn')
-            logger.debug(f"Successfully read CSV data using latin-1 for {raw_path.name}")
-        except (pd.errors.ParserError, Exception) as e_latin1:
-             logger.error(f"All CSV parsing attempts failed for {raw_path.name}: {e_latin1}")
-             # --- Placeholder for Excel Reading ---
-             # Consider implementing this if CSV fails often and Excel is an option
-             # logger.info("Excel reading not implemented yet.")
-             # --- End Placeholder ---
-             return None # Give up if CSV fails and Excel not implemented/failed
-
-    if df is None or df.empty: # Check if DataFrame is empty after reading
-        logger.warning(f"Downloaded file {raw_path.name} resulted in an empty DataFrame.")
-        return None # Treat empty file as failure for this record
-
-    # Standardize columns based on data type
-    logger.debug(f"Standardizing {len(df)} rows for {data_type}...")
-    if data_type == 'contributions':
-        df_standardized = standardize_columns(df.copy(), CONTRIBUTION_COLUMN_MAP)
-    elif data_type == 'expenditures':
-        df_standardized = standardize_columns(df.copy(), EXPENDITURE_COLUMN_MAP)
-    else:
-        logger.error(f"Invalid data_type '{data_type}' for column standardization.")
-        return None
-
-    # Add metadata columns
-    df_standardized['source_search_term'] = source_search_term
-    df_standardized['data_source_url'] = download_url
-    df_standardized['scrape_year'] = search_year
-    df_standardized['raw_file_path'] = str(raw_path)
-    df_standardized['scrape_timestamp'] = datetime.now().isoformat()
-    df_standardized['data_type'] = data_type # Clarify if contribution or expenditure
-
-    # --- Data Cleaning Steps ---
-    # Example: Convert amount columns to numeric, handling errors
-    amount_col = 'contribution_amount' if data_type == 'contributions' else 'expenditure_amount'
-    if amount_col in df_standardized.columns:
-        # Remove currency symbols, commas, handle potential parentheses for negatives
-        df_standardized[amount_col] = df_standardized[amount_col].astype(str).str.replace(r'[$,()]', '', regex=True)
-        df_standardized[amount_col] = pd.to_numeric(df_standardized[amount_col], errors='coerce')
-        # Fill NaNs introduced by coercion if needed (e.g., with 0)
-        # df_standardized[amount_col] = df_standardized[amount_col].fillna(0)
-
-    # Example: Convert date columns to datetime objects
-    date_col = 'contribution_date' if data_type == 'contributions' else 'expenditure_date'
-    if date_col in df_standardized.columns:
-        df_standardized[date_col] = pd.to_datetime(df_standardized[date_col], errors='coerce')
-        # Format date for consistency if needed
-        # df_standardized[date_col] = df_standardized[date_col].dt.strftime('%Y-%m-%d')
-
-    # Add other cleaning steps as needed (e.g., standardizing state names, zip codes)
-
-    logger.info(f"Successfully processed and cleaned {len(df_standardized)} {data_type} records for '{source_search_term}' ({search_year}).")
-    return df_standardized
-
-
-# --- Main Orchestration Function ---
-def main(start_year: Optional[int] = None, end_year: Optional[int] = None, data_dir: Optional[Union[str, Path]] = None) -> Optional[Path]:
-    """Main function to orchestrate scraping Idaho campaign finance data."""
-    # Setup paths using the provided base directory or default from config
-    paths = setup_project_paths(data_dir)
-    # Ensure logger is set up correctly for this module
-    global logger
-    logger = setup_logging(FINANCE_SCRAPE_LOG_FILE, paths['log'])
-
-    # Determine year range
-    current_year = datetime.now().year
-    if start_year is None: start_year = current_year - 2 # Default to last 2 years + current
-    if end_year is None: end_year = current_year
-    if start_year > end_year:
-        logger.error("Start year cannot be after end year.")
-        return None
-
-    logger.info(f"=== Starting Idaho Campaign Finance Scraping ===")
-    logger.info(f"Data Source: Idaho Sunshine Portal ({ID_FINANCE_BASE_URL})")
-    logger.info(f"Target Years: {start_year}-{end_year}")
-    logger.info(f"Base Data Directory: {paths['base']}")
-    logger.warning("Finance scraping relies on website structure and form fields - VERIFY field names in search_for_finance_data_link.")
-
-    # --- Load Legislator Names for Searching ---
-    legislators_file = paths['processed'] / 'legislators_ID.csv'
-    if not legislators_file.is_file():
-        logger.error(f"Processed legislators file not found: {legislators_file}")
-        logger.error("Run the main data collection script (including LegiScan legislator collection) first.")
-        return None
-
-    try:
-        legislators_df = pd.read_csv(legislators_file, usecols=['name'])
-        search_targets = legislators_df['name'].dropna().unique().tolist()
-        logger.info(f"Loaded {len(search_targets)} unique legislator names to search for.")
-        if not search_targets:
-             logger.error("No legislator names loaded. Cannot proceed.")
-             return None
-    except KeyError:
-        logger.error(f"Column 'name' not found in legislators file: {legislators_file}.")
-        return None
-    except Exception as e:
-        logger.error(f"Error reading legislators file {legislators_file}: {e}", exc_info=True)
-        return None
-
-    # --- Iterate and Scrape ---
-    all_finance_data_dfs = [] # List to hold successfully processed DataFrames
-    search_attempts = 0
-    download_successes = 0
-    download_failures = 0
-
-    # Loop through years, then legislators
-    for year in range(start_year, end_year + 1):
-        logger.info(f"--- Processing Year: {year} ---")
-        for target_name in tqdm(search_targets, desc=f"Searching Finance Data ({year})", unit="target"):
-            # Search for both contributions and expenditures for each target
-            for data_type in ['contributions', 'expenditures']:
-                search_attempts += 1
-                logger.debug(f"Attempting search for {data_type}, {target_name}, {year}")
-                try:
-                    # Call the implemented search function
-                    download_link = search_for_finance_data_link(target_name, year, data_type)
-
-                    if download_link:
-                        # Add a polite wait time before hitting the download link
-                        time.sleep(random.uniform(0.5, ID_FINANCE_DOWNLOAD_WAIT_SECONDS))
-
-                        # Download and process the data file
-                        df_processed = download_and_extract_finance_data(
-                            download_link, target_name, year, data_type, paths
-                        )
-
-                        if df_processed is not None and not df_processed.empty:
-                            all_finance_data_dfs.append(df_processed)
-                            download_successes += 1
-                        else:
-                             logger.warning(f"No {data_type} data extracted for '{target_name}' ({year}) from link: {download_link}")
-                             download_failures += 1
-                    else:
-                         logger.info(f"No download link found for {data_type}, '{target_name}', {year}.")
-                         # No download failure here, just no link found
-
-                except Exception as e_scrape:
-                     logger.error(f"Unhandled error during scrape attempt for {data_type}, '{target_name}', {year}: {e_scrape}", exc_info=True)
-                     download_failures += 1 # Count errors as failures
-
-                # Small delay between contribution/expenditure searches for the same person/year
-                time.sleep(random.uniform(0.3, 0.9))
-
-            # Wait a bit longer between different legislators/committees
-            time.sleep(random.uniform(0.6, 1.8))
-
-
-    # --- Consolidate and Save Results ---
-    logger.info(f"--- Idaho Finance Scraping Finished ({start_year}-{end_year}) ---")
-    logger.info(f"Total search attempts: {search_attempts}")
-    logger.info(f"Successful downloads/extractions: {download_successes}")
-    logger.info(f"Failed/empty downloads or errors: {download_failures}")
-
-    if not all_finance_data_dfs:
-        logger.warning("No campaign finance data was successfully collected.")
-        return None # Return None if nothing was collected
-
-    try:
-        # Concatenate all collected DataFrames
-        logger.info(f"Consolidating {len(all_finance_data_dfs)} collected dataframes...")
-        # Handle potential schema differences during concat if needed (e.g., using join='outer')
-        consolidated_df = pd.concat(all_finance_data_dfs, ignore_index=True, sort=False)
-        total_records = len(consolidated_df)
-        logger.info(f"Consolidated a total of {total_records} finance records.")
-
-        if total_records == 0:
-             logger.warning("Consolidation resulted in an empty DataFrame.")
-             return None
-
-        # Define output file path in the 'processed' directory
-        # Include year range in filename for clarity
-        output_file = paths['processed'] / f'finance_idaho_consolidated_{start_year}-{end_year}.csv'
-
-        # Save the consolidated data using utils.convert_to_csv
-        num_saved = convert_to_csv(consolidated_df.to_dict('records'), output_file)
-
-        if num_saved == total_records:
-            logger.info(f"Successfully saved {num_saved} consolidated finance records to: {output_file}")
-            return output_file # Return path to the saved file
-        else:
-            logger.error(f"Mismatch saving consolidated data. Expected {total_records}, saved {num_saved}. Check CSV file and logs.")
-            # File might exist but be incomplete or empty if convert_to_csv had issues.
-            return output_file if output_file.exists() else None
-
-    except Exception as e_concat:
-        logger.error(f"Error consolidating or saving finance data: {e_concat}", exc_info=True)
-        return None
-
-# --- Main Execution Block (for standalone testing) ---
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Scrape campaign finance data from Idaho Secretary of State website (Sunshine Portal)."
-    )
-    parser.add_argument('--start-year', type=int, default=None, # Default handled in main
-                        help='Start year for data collection (default: current year - 2)')
-    parser.add_argument('--end-year', type=int, default=None, # Default handled in main
-                        help='End year for data collection (default: current year)')
-    parser.add_argument('--data-dir', type=str, default=None,
-                        help='Override base data directory (default: ./data)')
-
-    args = parser.parse_args()
-
-    # Setup basic logging/paths for standalone run
-    # Note: Logger setup might happen twice if called by main.py, but utils.setup_logging handles it.
-    paths = setup_project_paths(args.data_dir)
-    logger = setup_logging(FINANCE_SCRAPE_LOG_FILE, paths['log'])
-
-    try:
-        output_path = main(start_year=args.start_year, end_year=args.end_year, data_dir=args.data_dir)
-        if output_path:
-            print(f"\nFinance scraping finished. Output file: {output_path}")
-            sys.exit(0) # Success
-        else:
-            print("\nFinance scraping finished but produced no output or failed.")
-            sys.exit(1) # Failure
-    except Exception as e:
-        logger.critical(f"Critical error during finance scraping main execution: {e}", exc_info=True)
-        sys.exit(2) # Critical failure
-    finally:
-        logging.shutdown() # Ensure logs flushed
-```
+    logging.shutdown()  # Ensure logs are flushed before exit

@@ -13,7 +13,7 @@ python-Levenshtein>=0.12.2 # Performance enhancement for fuzzywuzzy (requires C 
 
 # --- Data Processing & Feature Engineering (Includes Core & Planned) ---
 numpy~=1.26.4             # Numerical operations (dependency of pandas, good to pin)
-scikit-learn~=1.4.2       # Preprocessing, modeling utilities, evaluation metrics
+scikit-learn~=1.5.0       # Preprocessing, modeling utilities, evaluation metrics
 geopandas~=0.14.3         # Geospatial data handling (Planned for demographics)
 # Note: Installing geopandas can be complex due to C dependencies (GDAL, GEOS, PROJ).
 # Using Conda (conda install geopandas) is often recommended.

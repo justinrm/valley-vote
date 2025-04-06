@@ -26,7 +26,7 @@ from tenacity import (
 root_logger = logging.getLogger()
 # Ensure root logger has a basic handler if not configured elsewhere initially
 if not root_logger.hasHandlers():
-     logging.basicConfig(
+    logging.basicConfig(
         level=logging.WARNING, # Be less verbose by default for root
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[logging.StreamHandler(sys.stdout)]
@@ -177,11 +177,9 @@ DEFAULT_HEADERS = {
 }
 
 @retry(
-    stop=stop_after_attempt(4), # Slightly increased retries
-    wait=wait_exponential(multiplier=1.5, min=3, max=45), # Slightly longer wait window
-    # Retry only on specific network-related, potentially transient errors
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1.5, min=3, max=45),
     retry=retry_if_exception_type((requests.exceptions.Timeout, requests.exceptions.ConnectionError)),
-    # Use tenacity's built-in logger for sleep messages
     before_sleep=before_sleep_log(root_logger, logging.WARNING)
 )
 def fetch_page(
@@ -189,11 +187,27 @@ def fetch_page(
     headers: Optional[Dict[str, str]] = None,
     timeout: int = 40,
     method: str = 'GET',
-    params: Optional[Dict] = None,
-    data: Optional[Dict] = None,
-    return_bytes: bool = False # Added option to return bytes for non-text content
+    params: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    return_bytes: bool = False
 ) -> Optional[Union[str, bytes]]:
-    """Fetch content from URL with retries, improved error handling, and optional byte return."""
+    """Fetch content from URL with retries and improved error handling.
+    
+    Args:
+        url: The URL to fetch
+        headers: Optional HTTP headers to include in the request
+        timeout: Request timeout in seconds
+        method: HTTP method to use ('GET' or 'POST')
+        params: Optional query parameters for the request
+        data: Optional form data for POST requests
+        return_bytes: If True, return raw bytes instead of decoded text
+        
+    Returns:
+        The response content as either text or bytes, or None if the request failed
+        
+    Raises:
+        requests.exceptions.RequestException: If the request fails after retries
+    """
     logger = logging.getLogger(__name__)
     request_headers = DEFAULT_HEADERS.copy()
     if headers:
@@ -204,7 +218,6 @@ def fetch_page(
     log_data = data if data else '{}'
     logger.info(f"Fetching URL ({method}): {url}")
     logger.debug(f"Params: {log_params}, Data: {log_data}, Headers: {request_headers}")
-
 
     try:
         session = requests.Session() # Use session for potential cookie handling, keep-alive
@@ -220,48 +233,47 @@ def fetch_page(
 
         # Check for HTTP errors AFTER checking status code potentially
         if response.status_code >= 400:
-             # Log specific error but raise HTTPError to handle different cases below
-             logger.error(f"HTTP error {response.status_code} received for {url}. Response text (first 500 chars): {response.text[:500]}")
-             response.raise_for_status() # Raise the actual HTTPError
-
+            # Log specific error but raise HTTPError to handle different cases below
+            logger.error(f"HTTP error {response.status_code} received for {url}. Response text (first 500 chars): {response.text[:500]}")
+            response.raise_for_status() # Raise the actual HTTPError
 
         # Handle content
         if return_bytes:
-             content = response.content # Get raw bytes
-             logger.debug(f"Fetched {len(content)} bytes from {url}")
-             if len(content) < 100: # Small heuristic for bytes
-                  logger.warning(f"Very small byte response ({len(content)} bytes) from {url}.")
-             return content
+            content = response.content # Get raw bytes
+            logger.debug(f"Fetched {len(content)} bytes from {url}")
+            if len(content) < 100: # Small heuristic for bytes
+                logger.warning(f"Very small byte response ({len(content)} bytes) from {url}.")
+            return content
         else:
-             # Decode text carefully
-             content_type = response.headers.get('Content-Type', '').lower()
-             encoding = response.encoding # Use requests' detected encoding first
-             text_content = None
-             try:
-                 text_content = response.text # Accessing .text performs decoding
-                 logger.debug(f"Decoded text (approx {len(text_content)} chars) from {url} using encoding '{encoding}'.")
-             except Exception as decode_err:
-                 logger.error(f"Error decoding response from {url} with encoding '{encoding}': {decode_err}")
-                 # Fallback attempt if .text failed? Unlikely but possible.
-                 try:
-                     logger.warning("Trying fallback decoding with utf-8 ignore.")
-                     text_content = response.content.decode('utf-8', errors='ignore')
-                 except Exception as fb_err:
-                     logger.error(f"Fallback decoding also failed: {fb_err}")
-                     return None # Give up if decoding fails badly
+            # Decode text carefully
+            content_type = response.headers.get('Content-Type', '').lower()
+            encoding = response.encoding # Use requests' detected encoding first
+            text_content = None
+            try:
+                text_content = response.text # Accessing .text performs decoding
+                logger.debug(f"Decoded text (approx {len(text_content)} chars) from {url} using encoding '{encoding}'.")
+            except Exception as decode_err:
+                logger.error(f"Error decoding response from {url} with encoding '{encoding}': {decode_err}")
+                # Fallback attempt if .text failed? Unlikely but possible.
+                try:
+                    logger.warning("Trying fallback decoding with utf-8 ignore.")
+                    text_content = response.content.decode('utf-8', errors='ignore')
+                except Exception as fb_err:
+                    logger.error(f"Fallback decoding also failed: {fb_err}")
+                    return None # Give up if decoding fails badly
 
-             if text_content is not None and len(text_content) < 200: # Heuristic for small text pages
-                 logger.warning(f"Small text response received from {url} ({len(text_content)} chars). May indicate error or empty data.")
+            if text_content is not None and len(text_content) < 200: # Heuristic for small text pages
+                logger.warning(f"Small text response received from {url} ({len(text_content)} chars). May indicate error or empty data.")
 
-             return text_content
+            return text_content
 
     # Handle exceptions specifically
     except requests.exceptions.Timeout as e:
         logger.error(f"Timeout ({timeout}s) occurred while fetching {url}.")
-        raise # Re-raise Timeout to trigger tenacity retry
+        raise  # Re-raise Timeout to trigger tenacity retry
     except requests.exceptions.ConnectionError as e:
-         logger.error(f"Connection error occurred while fetching {url}: {str(e)}")
-         raise # Re-raise ConnectionError to trigger tenacity retry
+        logger.error(f"Connection error occurred while fetching {url}: {str(e)}")
+        raise  # Re-raise ConnectionError to trigger tenacity retry
     except requests.exceptions.HTTPError as e:
         # Handle specific HTTP errors after raise_for_status()
         # 404 is common, log as warning, don't retry usually
@@ -269,17 +281,17 @@ def fetch_page(
             logger.warning(f"HTTP 404 Not Found for {url}. Resource likely does not exist.")
         # Other client errors (4xx except 429 - handled elsewhere if needed)
         elif 400 <= e.response.status_code < 500 and e.response.status_code != 429:
-             logger.error(f"HTTP Client Error {e.response.status_code} for {url}. Check request parameters/headers.")
+            logger.error(f"HTTP Client Error {e.response.status_code} for {url}. Check request parameters/headers.")
         # Server errors (5xx) - already logged above, might be retried by tenacity if raised
         elif e.response.status_code >= 500:
             logger.error(f"HTTP Server Error {e.response.status_code} for {url}. Retries might apply.")
         # Don't raise here unless tenacity should retry based on the exception type.
         # Since HTTPError isn't in the retry list, execution stops for this call.
-        return None # Indicate failure for this specific call after HTTPError
+        return None  # Indicate failure for this specific call after HTTPError
     except requests.exceptions.RequestException as e:
         # Catch other general request errors (e.g., invalid URL structure)
         logger.error(f"General request exception fetching {url}: {str(e)}")
-        return None # Don't retry these usually
+        return None  # Don't retry these usually
     except Exception as e:
         # Catch-all for unexpected errors during the request/response handling
         logger.error(f"Unexpected error during fetch_page for {url}: {e}", exc_info=True)
@@ -301,10 +313,10 @@ def setup_project_paths(base_dir_override: Optional[Union[str, Path]] = None) ->
     paths = {
         'base': base_dir,
         # Core output directories
-        'log': base_dir / 'logs', # Dedicated log directory
+        'log': base_dir / 'logs',                # Dedicated log directory
         'raw': base_dir / 'raw',
         'processed': base_dir / 'processed',
-        'artifacts': base_dir / 'artifacts', # General place for non-raw/processed outputs
+        'artifacts': base_dir / 'artifacts',     # General place for non-raw/processed outputs
 
         # Specific Raw Subdirectories (add more as needed based on data types)
         'raw_legislators': base_dir / 'raw' / 'legislators',
@@ -313,11 +325,11 @@ def setup_project_paths(base_dir_override: Optional[Union[str, Path]] = None) ->
         'raw_committees': base_dir / 'raw' / 'committees',
         'raw_committee_memberships': base_dir / 'raw' / 'committee_memberships',
         'raw_sponsors': base_dir / 'raw' / 'sponsors',
-        'raw_campaign_finance': base_dir / 'raw' / 'campaign_finance', # Top level for finance
+        'raw_campaign_finance': base_dir / 'raw' / 'campaign_finance',  # Top level for finance
         'raw_texts': base_dir / 'raw' / 'texts',
         'raw_amendments': base_dir / 'raw' / 'amendments',
         'raw_supplements': base_dir / 'raw' / 'supplements',
-        'raw_monitor_artifacts': base_dir / 'artifacts' / 'monitor', # Store monitor HTML etc.
+        'raw_monitor_artifacts': base_dir / 'artifacts' / 'monitor',  # Store monitor HTML etc.
 
         # Specific Processed Files (can be defined here or constructed in main scripts)
         # e.g., 'processed_legislators_csv': base_dir / 'processed' / 'legislators_{state}.csv'

@@ -1,85 +1,78 @@
 #!/usr/bin/env python3
-"""Scrape campaign finance data from Idaho SOS Sunshine Portal."""
+"""
+Scrape campaign finance data from Idaho SOS Sunshine Portal.
+
+This module implements Idaho-specific campaign finance data collection.
+It is called directly by main.py rather than through data_collection.py's stub function,
+as it contains state-specific scraping logic.
+
+Dependencies:
+- Requires processed legislators file from data_collection.py
+- Uses shared path and logging configuration
+- Uses shared utility functions from utils.py
+"""
 
 # Standard library imports
 import argparse
 import csv
 import json
-import logging # Import logging
+import logging
 import re
 import time
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
-import io # For reading content directly
-import sys # For sys.exit in standalone
+from typing import Dict, List, Optional, Union, Any, Tuple
+from urllib.parse import urljoin, urlparse
+import io
+import sys
 
 # Third-party imports
-# Requirements: requests, pandas, beautifulsoup4, tqdm
-import requests # Need requests here
+import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from tqdm import tqdm
-from urllib.parse import urljoin # urlparse, parse_qs not strictly needed here now
 
-# --- Project Imports ---
-# Use relative imports within the package structure
+# Local imports
 from .config import (
-    ID_FINANCE_BASE_URL, ID_FINANCE_SEARCH_PATH, ID_FINANCE_DOWNLOAD_WAIT_SECONDS,
-    FINANCE_SCRAPE_LOG_FILE, # Use config for log file name
-    FINANCE_COMMITTEE_INDICATORS # Import committee indicators
+    ID_FINANCE_BASE_URL,
+    ID_FINANCE_SEARCH_PATH,
+    ID_FINANCE_DOWNLOAD_WAIT_SECONDS,
+    FINANCE_SCRAPE_LOG_FILE,
+    FINANCE_COMMITTEE_INDICATORS
 )
 from .utils import (
-    setup_logging, save_json, convert_to_csv, fetch_page, setup_project_paths
+    setup_logging,
+    save_json,
+    convert_to_csv,
+    fetch_page,
+    setup_project_paths
 )
+from .data_collection import FINANCE_COLUMN_MAPS
+
+# --- Custom Exceptions ---
+class ScrapingStructureError(Exception):
+    """Custom exception for unexpected website structure during scraping."""
+    pass
 
 # --- Configure Logging ---
-# Get logger instance for this module using the name defined in config
-# Setup should be done by the calling script (e.g., main.py or standalone block)
 logger = logging.getLogger(Path(FINANCE_SCRAPE_LOG_FILE).stem)
 
-# --- Custom Exception ---
-# Consider adding if needed, but specific logging might suffice for now
-# class ScrapingStructureError(Exception):
-#     """Custom exception for unexpected website structure during scraping."""
-#     pass
-
 # --- Constants ---
-# Column maps for standardization (Moved from top for better flow)
-CONTRIBUTION_COLUMN_MAP = {
-    'donor_name': ['donor name', 'contributor name', 'name', 'from', 'contributor'],
-    'contribution_date': ['date', 'contribution date', 'received date'],
-    'contribution_amount': ['amount', 'contribution amount', '$', 'receipt amount'],
-    'donor_address': ['address', 'donor address', 'contributor address', 'addr 1'],
-    'donor_city': ['city', 'donor city', 'contributor city'],
-    'donor_state': ['state', 'st', 'donor state', 'contributor state'],
-    'donor_zip': ['zip', 'zip code', 'donor zip', 'contributor zip'],
-    'donor_employer': ['employer', 'donor employer', 'contributor employer'],
-    'donor_occupation': ['occupation', 'donor occupation', 'contributor occupation'],
-    'contribution_type': ['type', 'contribution type', 'receipt type'],
-    'committee_name': ['committee name', 'recipient committee', 'filer name'], # Often the committee being searched for
-    'report_name': ['report name', 'report title', 'report'],
-    'transaction_id': ['transaction id', 'tran id', 'transactionid']
-}
-EXPENDITURE_COLUMN_MAP = {
-    'expenditure_date': ['date', 'expenditure date', 'payment date'],
-    'payee_name': ['payee', 'paid to', 'name', 'payee name', 'vendor name'],
-    'expenditure_amount': ['amount', 'expenditure amount', '$', 'payment amount'],
-    'expenditure_purpose': ['purpose', 'description', 'expenditure purpose', 'memo'],
-    'payee_address': ['address', 'payee address', 'vendor address', 'addr 1'],
-    'payee_city': ['city', 'payee city', 'vendor city'],
-    'payee_state': ['state', 'st', 'payee state', 'vendor state'],
-    'payee_zip': ['zip', 'zip code', 'payee zip', 'vendor zip'],
-    'expenditure_type': ['type', 'expenditure type', 'payment type', 'expenditure code'],
-    'committee_name': ['committee name', 'paying committee', 'filer name'], # Often the committee being searched for
-    'report_name': ['report name', 'report title', 'report'],
-    'transaction_id': ['transaction id', 'tran id', 'transactionid']
-}
+CONTRIBUTION_COLUMN_MAP = FINANCE_COLUMN_MAPS['contributions']
+EXPENDITURE_COLUMN_MAP = FINANCE_COLUMN_MAPS['expenditures']
 
 # --- Helper Functions ---
 def standardize_columns(df: pd.DataFrame, column_map: Dict[str, List[str]]) -> pd.DataFrame:
-    """Standardizes DataFrame columns based on a mapping, ensuring all standard columns exist."""
+    """Standardizes DataFrame columns based on a mapping, ensuring all standard columns exist.
+    
+    Args:
+        df: Input DataFrame to standardize
+        column_map: Dictionary mapping standard column names to possible variations
+        
+    Returns:
+        DataFrame with standardized column names and all required columns present
+    """
     # Ensure DataFrame is not empty
     if df.empty:
         logger.warning("Attempted to standardize columns on an empty DataFrame.")
@@ -743,8 +736,8 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
              return None
 
         # Define output file path in the 'processed' directory
-        # Include year range in filename for clarity
-        output_filename = f'finance_idaho_consolidated_{start_year}-{end_year}.csv'
+        # Include state and year range in filename for consistency with data_collection.py
+        output_filename = f'finance_ID_consolidated_{start_year}-{end_year}.csv'
         output_file = paths['processed'] / output_filename
 
         # Save the consolidated data using utils.convert_to_csv

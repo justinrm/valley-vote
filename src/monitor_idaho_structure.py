@@ -1,11 +1,18 @@
 # monitor_idaho_structure.py
+"""Monitor the structure of Idaho Legislature committee pages for changes."""
+
+# Standard library imports
 import argparse
 import random
 import time
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+from urllib.parse import urljoin
 
+# Third-party imports
+from bs4 import BeautifulSoup
+
+# Local imports
 from src.utils import setup_logging, fetch_page
 
 # --- Configure Logging ---
@@ -13,34 +20,46 @@ logger = setup_logging('monitor_idaho_structure.log')
 
 # --- Configuration ---
 # URLs to monitor (Matches data_collection.py's targets)
-MONITOR_TARGETS = {
+MONITOR_TARGETS: Dict[str, str] = {
     'House Committees': 'https://legislature.idaho.gov/house/committees/',
     'Senate Committees': 'https://legislature.idaho.gov/senate/committees/'
 }
 
 # Selectors based on the likely structure used by the scraper
-EXPECTED_HEADING_SELECTORS = ['h3', 'h4'] # Tags likely containing committee names
-EXPECTED_CONTENT_SELECTORS = ['ul', 'ol', 'p'] # Tags likely containing member lists
+EXPECTED_HEADING_SELECTORS: List[str] = ['h3', 'h4']  # Tags likely containing committee names
+EXPECTED_CONTENT_SELECTORS: List[str] = ['ul', 'ol', 'p']  # Tags likely containing member lists
 
 # Minimum number of potential committee headings expected per page
-MIN_EXPECTED_HEADINGS = 5
+MIN_EXPECTED_HEADINGS: int = 5
 
 # Network Configuration
-DEFAULT_WAIT = 1.0 # Shorter wait is okay for monitoring
+DEFAULT_WAIT: float = 1.0  # Shorter wait is okay for monitoring
 
 # --- Monitoring Logic ---
-def check_page_structure(name, url):
-    """Performs structural checks on a single page."""
+def check_page_structure(name: str, url: str) -> bool:
+    """Performs structural checks on a single page.
+    
+    Args:
+        name: Name of the page being checked (for logging)
+        url: URL of the page to check
+        
+    Returns:
+        bool: True if structure check passes, False otherwise
+        
+    Raises:
+        requests.exceptions.RequestException: If page fetch fails
+        ValueError: If HTML parsing fails
+    """
     logger.info(f"--- Checking Structure: {name} ({url}) ---")
     html_content = fetch_page(url)
 
     if html_content is None:
         logger.error(f"Failed to fetch HTML content for {name}. Structure check failed.")
-        return False  # Fetch failure is a structure failure
+        return False
 
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
-        issues_found = []
+        issues_found: List[str] = []
 
         # 1. Check for Presence of Heading Tags
         heading_tags = soup.find_all(EXPECTED_HEADING_SELECTORS)
@@ -62,15 +81,14 @@ def check_page_structure(name, url):
         # 4. Check Basic Relationship (Content after Heading)
         if heading_tags and content_tags:
             first_heading_pos = html_content.find(str(heading_tags[0]))
-            first_content_pos = html_content.find(str(content_tags[0]))  # Simple position check
-            # Check if at least one content tag is found somewhere after the first heading
+            first_content_pos = html_content.find(str(content_tags[0]))
             found_content_after_heading = False
             if first_heading_pos != -1:
                 for c_tag in content_tags:
                     c_pos = html_content.find(str(c_tag))
                     if c_pos != -1 and c_pos > first_heading_pos:
                         found_content_after_heading = True
-                        break  # Found one example, good enough for basic check
+                        break
             if not found_content_after_heading:
                 pass  # Commenting out issue reporting for this simple check to reduce noise
 
@@ -86,15 +104,17 @@ def check_page_structure(name, url):
 
     except Exception as e:
         logger.error(f"Error parsing or analyzing HTML for {name}: {e}", exc_info=True)
-        return False  # Parser error implies structure issue
+        return False
 
 # --- Main Execution ---
-def main(args=None):
-    """
-    Main function to monitor Idaho Legislature committee page structure.
+def main(args: Optional[argparse.Namespace] = None) -> int:
+    """Main function to monitor Idaho Legislature committee page structure.
     
     Args:
         args: Optional parsed arguments. If None, will parse command line arguments.
+        
+    Returns:
+        int: 0 if all checks pass, 1 if any check fails
     """
     if args is None:
         parser = argparse.ArgumentParser(

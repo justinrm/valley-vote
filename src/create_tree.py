@@ -1,17 +1,28 @@
+"""Create the directory structure for the valley-vote project."""
+
+# Standard library imports
 import os
 import sys
+from pathlib import Path
+from typing import List, Tuple
 
-def create_directory_structure():
-    """
-    Creates the necessary directory structure for the valley-vote project.
-    Reads directory paths defined in other project files to ensure completeness.
+def create_directory_structure() -> Tuple[int, int]:
+    """Creates the necessary directory structure for the valley-vote project.
+    
+    This function creates a standardized directory structure based on the project's needs.
+    It ensures all required directories exist for data collection, processing, and analysis.
+    
+    Returns:
+        Tuple[int, int]: A tuple containing (created_count, skipped_count)
+            - created_count: Number of directories created
+            - skipped_count: Number of directories that already existed
     """
     # Define the base directory for the project
-    base_dir = "valley-vote"
+    base_dir = Path("valley-vote")
 
     # Define the core directory structure relative to the base_dir
     # This list is derived from analyzing data_collection.py and scrape_finance_idaho.py
-    directories = [
+    directories: List[str] = [
         # Raw data directories from data_collection.py
         "data/raw/legislators",
         "data/raw/bills",
@@ -41,15 +52,12 @@ def create_directory_structure():
         "docs"
     ]
 
-    print(f"Attempting to create directory structure under: {os.path.abspath(base_dir)}")
+    print(f"Attempting to create directory structure under: {base_dir.absolute()}")
 
     # Create the base directory first if it doesn't exist
     try:
-        if not os.path.exists(base_dir):
-            os.makedirs(base_dir)
-            print(f"Created base directory: {base_dir}")
-        else:
-            print(f"Base directory already exists: {base_dir}")
+        base_dir.mkdir(exist_ok=True)
+        print(f"Base directory {'created' if not base_dir.exists() else 'already exists'}: {base_dir}")
     except OSError as e:
         print(f"ERROR: Could not create base directory '{base_dir}'. Check permissions. Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -57,44 +65,21 @@ def create_directory_structure():
     # Create each sub-directory in the structure
     created_count = 0
     skipped_count = 0
+    
     for directory in directories:
-        # Construct the full path relative to the current working directory
-        path = os.path.join(base_dir, directory)
+        path = base_dir / directory
         try:
-            # Use os.makedirs with exist_ok=True to handle nested creation and existing dirs
-            os.makedirs(path, exist_ok=True)
-
-            # Check if it *was* created now vs already existing before the call
-            # This check is slightly less precise with exist_ok=True, but good enough for feedback
-            # A more robust way would be to check existence *before* the makedirs call
-            # For simplicity, we'll just report based on the exist_ok behavior.
-            # We assume if exist_ok=True didn't raise an error, it either exists or was created.
-
-            # Refined check: Test existence *before* attempting creation for accurate reporting
-            if not os.path.exists(path):
-                # This block might not be reached if exist_ok=True creates it silently
-                # Re-checking after is better
-                os.makedirs(path, exist_ok=True)  # Ensure it exists
+            # Check if directory exists before attempting creation
+            if path.exists():
+                print(f"Directory already exists: {path}")
+                skipped_count += 1
+            else:
+                path.mkdir(parents=True, exist_ok=True)
                 print(f"Created directory: {path}")
                 created_count += 1
-            else:
-                # If it already existed before or was just created by makedirs
-                # To be absolutely sure, we could check existence *before* calling makedirs
-                # but let's keep it simpler: report 'exists' if makedirs doesn't raise error
-                # Let's check *before* the main creation call for better reporting
-                path_existed_before = os.path.exists(path)
-                os.makedirs(path, exist_ok=True)  # Ensure creation
-                if not path_existed_before:
-                    print(f"Created directory: {path}")
-                    created_count += 1
-                else:
-                    print(f"Directory already exists: {path}")
-                    skipped_count += 1
-
         except OSError as e:
             print(f"ERROR: Could not create directory '{path}'. Check permissions. Error: {e}", file=sys.stderr)
-            # Decide if we should stop or continue
-            # continue  # Continue trying other directories
+            continue
 
     print(f"\nDirectory structure creation complete.")
     print(f"Created: {created_count} directories.")
@@ -127,6 +112,8 @@ def create_directory_structure():
 ├── notebooks/
 └── docs/
 """)
+    
+    return created_count, skipped_count
 
 if __name__ == "__main__":
     create_directory_structure()

@@ -42,6 +42,7 @@ def main():
     
     # Setup project paths
     paths = setup_project_paths(args.data_dir)
+    years = range(args.start_year, args.end_year + 1)
     
     logger.info("=== Starting Valley Vote Data Collection ===")
     logger.info(f"State: {args.state}")
@@ -57,26 +58,41 @@ def main():
         if not args.skip_api:
             logger.info("=== Collecting Legislative Data ===")
             # Get session list for the specified years
-            sessions = data_collection.get_session_list(args.state, range(args.start_year, args.end_year + 1))
+            sessions = data_collection.get_session_list(args.state, years, paths)
             
-            # Collect legislators
-            data_collection.collect_legislators(args.state, sessions)
-            
-            # Collect committee definitions, bills, votes, and sponsors for each session
-            for session in sessions:
-                data_collection.collect_committee_definitions(session)
-                data_collection.collect_bills_votes_sponsors(session)
-            
-            # Consolidate yearly data
-            data_collection.consolidate_yearly_data('legislators', range(args.start_year, args.end_year + 1), 
-                                                  ['legislator_id', 'first_name', 'last_name', 'party', 'role', 'district'], 
-                                                  args.state)
-            data_collection.consolidate_yearly_data('bills', range(args.start_year, args.end_year + 1), 
-                                                  ['bill_id', 'session_id', 'bill_number', 'title', 'description', 'type', 'status', 'url'], 
-                                                  args.state)
-            data_collection.consolidate_yearly_data('votes', range(args.start_year, args.end_year + 1), 
-                                                  ['vote_id', 'bill_id', 'legislator_id', 'vote_value', 'vote_text'], 
-                                                  args.state)
+            if sessions:
+                # Collect legislators
+                data_collection.collect_legislators(args.state, sessions, paths)
+                
+                # Collect committee definitions, bills, votes, and sponsors for each session
+                for session in sessions:
+                    data_collection.collect_committee_definitions(session, paths)
+                    data_collection.collect_bills_votes_sponsors(session, paths)
+                
+                # Define columns for consolidation (matching data_collection.py definitions)
+                committee_cols = ['committee_id', 'name', 'chamber', 'chamber_id', 'session_id', 'year']
+                bill_cols = ['bill_id', 'change_hash', 'session_id', 'year', 'state', 'state_id', 'url', 
+                           'state_link', 'number', 'type', 'type_id', 'body', 'body_id', 'current_body', 
+                           'current_body_id', 'title', 'description', 'status', 'status_desc', 'status_date', 
+                           'pending_committee_id', 'subjects', 'subject_ids', 'sast_relations', 'text_stubs', 
+                           'amendment_stubs', 'supplement_stubs']
+                sponsor_cols = ['bill_id', 'legislator_id', 'sponsor_type_id', 'sponsor_type', 'sponsor_order', 
+                              'committee_sponsor', 'committee_id', 'session_id', 'year']
+                vote_cols = ['vote_id', 'bill_id', 'legislator_id', 'vote_id_type', 'vote_text', 'vote_value', 
+                           'date', 'description', 'yea', 'nay', 'nv', 'absent', 'total', 'passed', 'chamber', 
+                           'chamber_id', 'session_id', 'year']
+                legislator_cols = ['legislator_id', 'person_hash', 'name', 'first_name', 'middle_name', 'last_name',
+                                 'suffix', 'nickname', 'party_id', 'party', 'role_id', 'role', 'district', 'state_id',
+                                 'state', 'active', 'committee_sponsor', 'committee_id', 'ftm_eid', 'votesmart_id',
+                                 'opensecrets_id', 'knowwho_pid', 'ballotpedia', 'state_link', 'legiscan_url']
+                
+                # Consolidate yearly data
+                data_collection.consolidate_yearly_data('committees', years, committee_cols, args.state, paths)
+                data_collection.consolidate_yearly_data('bills', years, bill_cols, args.state, paths)
+                data_collection.consolidate_yearly_data('sponsors', years, sponsor_cols, args.state, paths)
+                data_collection.consolidate_yearly_data('votes', years, vote_cols, args.state, paths)
+            else:
+                logger.warning(f"No sessions found for {args.state} in years {args.start_year}-{args.end_year}")
         
         # 3. Collect campaign finance data
         if not args.skip_finance:
@@ -84,7 +100,7 @@ def main():
             finance_file = scrape_finance_idaho.main(
                 start_year=args.start_year,
                 end_year=args.end_year,
-                data_dir=paths['base']
+                data_dir=args.data_dir
             )
         
         # 4. Match finance data to legislators
@@ -96,7 +112,8 @@ def main():
                 match_finance_to_leg.match_finance_to_legislators(
                     finance_file,
                     legislators_file,
-                    output_file
+                    output_file,
+                    paths
                 )
         
         logger.info("=== Data Collection Complete ===")
