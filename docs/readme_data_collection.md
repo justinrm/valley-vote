@@ -1,276 +1,293 @@
-# Valley Vote - Data Collection Module
-
-## Overview
-
-This document provides comprehensive documentation for the data collection component of the Valley Vote platform. The `data_collection.py` script serves as the foundation of our Idaho Legislative Vote Prediction system, designed to gather, process, and organize legislative data from the LegiScan API in preparation for machine learning model development.
-
-## Purpose
-
-The primary purpose of this module is to systematically collect five years (2020-2024) of Idaho legislative data required to train machine learning models that can predict how legislators will vote on bills. This module:
-
-1. Retrieves raw data from the LegiScan API
-2. Organizes it into a structured file hierarchy
-3. Processes the data into formats optimized for analysis
-4. Generates preliminary feature matrices for model training
-
-## Data Sources
-
-All data is sourced from the LegiScan API, a reputable provider of legislative information for U.S. states. The script collects:
-
-- **Legislators**: Detailed profiles including party affiliation, district, role, and demographics
-- **Bills**: Complete bill information including title, description, subjects, and status
-- **Votes**: Individual voting records with standardized encodings
-- **Committees**: Committee structures and memberships
-- **Sponsorships**: Bill sponsorship relationships
+### Data Collection Script (data_collection.py) README
+### Overview
 
-## Requirements
+This script serves as the primary data acquisition tool for the Valley Vote project, focusing on fetching core legislative information from the LegiScan API. It also includes state-specific web scraping capabilities (currently implemented only for Idaho committee memberships) and functionality to match names from scraped data to official legislator records using fuzzy matching.
 
-- Python 3.8+
-- LegiScan API key (configured in the script)
-- Required packages:
-  - requests
-  - pandas
-  - tenacity
-  - tqdm
-  - logging
+## The script fetches information about:
 
-Install dependencies using:
-```
-pip install requests pandas tenacity tqdm
-```
+Legislative Sessions
 
-## Directory Structure
+Legislator Profiles (via getSessionPeople)
 
-The script maintains a specific directory structure for organized data management:
+Committee Definitions (via getCommittee)
 
-```
-data/
-├── raw/                      # Raw JSON data
-│   ├── legislators/          # Individual legislator profiles
-│   ├── bills/                # Bills organized by year
-│   │   ├── 2020/
-│   │   └── ...
-│   ├── votes/                # Vote records organized by year
-│   │   ├── 2020/
-│   │   └── ...
-│   ├── committees/           # Committee information by year
-│   │   ├── 2020/
-│   │   └── ...
-│   ├── committee_memberships/ # Committee membership details
-│   │   ├── 2020/
-│   │   └── ...
-│   └── sponsors/             # Bill sponsorship information
-│       ├── 2020/
-│       └── ...
-├── processed/                # CSV files ready for analysis
-    ├── legislators.csv
-    ├── bills_2020.csv
-    ├── bills_2021.csv
-    ├── ...
-    ├── votes_2020.csv
-    ├── ...
-    ├── committee_memberships.csv
-    ├── sponsors_2020.csv
-    ├── ...
-    └── vote_features.csv     # Preliminary feature matrix
-```
+Bills (Master List via getMasterList, Details via getBill)
 
-## Usage
+Bill Sponsors (extracted from getBill)
 
-### Basic Execution
+Roll Call Votes (Stubs from getBill, Details via getRollCall)
 
-Run the script from the command line:
+It saves raw data responses (primarily JSON) for auditability and processes/consolidates this information into structured yearly CSV files suitable for downstream analysis and model training.
 
-```bash
-python data_collection.py
-```
+Crucially, this script includes non-functional stub functions as placeholders for collecting additional complex data sources (Campaign Finance, District Demographics, Election History). The intention is for these sources to be handled by separate, dedicated scripts (like the provided scrape_finance_idaho.py for campaign finance) due to their unique complexities (e.g., state-specific portals, GIS processing, diverse file formats).
 
-The script will:
-1. Connect to the LegiScan API
-2. Retrieve data for Idaho legislative sessions from 2020-2024
-3. Process and store the data in both raw and processed formats
-4. Generate a preliminary feature matrix for model training
+Features
 
-### Configuration Options
+Comprehensive LegiScan API Integration: Fetches data from key LegiScan endpoints:
 
-Edit the following constants at the top of the script to adjust its behavior:
+getSessionList: Retrieves legislative sessions for a state and year range.
 
-- `API_KEY`: Your LegiScan API key
-- `STATE`: State abbreviation (default: 'ID' for Idaho)
-- `YEARS`: Year range to collect data for (default: 2020-2024)
-- `RAW_DIR`: Directory for raw JSON data (default: 'data/raw/')
-- `PROCESSED_DIR`: Directory for processed CSV files (default: 'data/processed/')
-- `MAX_RETRIES`: Maximum number of API request retries (default: 5)
-- `DEFAULT_WAIT`: Base wait time between API calls in seconds (default: 1)
+getSessionPeople: Gets legislator details for a specific session (used for primary legislator info).
 
-## Key Features
+getCommittee: Fetches committee definitions for a session.
 
-### Comprehensive Data Collection
+getMasterList: Gets the list of bills for a session.
 
-The script collects a rich set of data points essential for effective vote prediction:
+getBill: Retrieves detailed information for a specific bill, including sponsors, vote stubs, text/amendment/supplement stubs, subjects, and history.
 
-- **Detailed Legislator Profiles**: Beyond basic information like name and party, the script captures role, district, and demographic data (gender, ethnicity, religion) when available.
+getRollCall: Fetches detailed vote results (including individual legislator votes) for a specific vote ID.
 
-- **Complete Bill Context**: Collects not just bill titles but also descriptions, subjects/topics, status, and URLs, providing context for vote analysis.
+Robust Fetching & Error Handling:
 
-- **Committee Networks**: Gathers committee structures and memberships to enable network analysis of legislative relationships.
+Uses tenacity for automatic retries with exponential backoff for API calls and web scraping requests.
 
-- **Bill Sponsorships**: Captures primary and co-sponsorship data as indicators of legislative priorities and alliances.
+Handles transient network errors, timeouts, and specific HTTP status codes (e.g., 429 Rate Limit, 404 Not Found).
 
-- **Standardized Vote Values**: Encodes votes numerically (1=yea, 0=nay, -1=abstain, -2=absent) for consistent analysis.
+Parses LegiScan API status codes ('OK' vs. 'ERROR') and specific error messages.
 
-### Technical Robustness
+Includes custom exceptions (APIRateLimitError, APIResourceNotFoundError).
 
-The script incorporates several technical features to ensure reliable data collection:
+State-Specific Web Scraping (Idaho):
 
-- **Intelligent Retry Logic**: Uses the `tenacity` library to implement exponential backoff for API failures.
+Scrapes current-year committee membership information from the Idaho Legislature website (legislature.idaho.gov).
 
-- **Rate Limit Management**: Varies request timing and detects rate limit responses to avoid API restrictions.
+Parses HTML using BeautifulSoup. Note: This component is inherently fragile and depends heavily on the Idaho Legislature website's structure remaining consistent.
 
-- **Comprehensive Logging**: Maintains detailed logs of all operations for debugging and audit purposes.
+Fuzzy Name Matching:
 
-- **Progress Visualization**: Uses `tqdm` progress bars to provide visual feedback during long-running operations.
+Uses fuzzywuzzy (with python-Levenshtein for speed) to match legislator names scraped from websites (currently Idaho committees) to the official names (name field) retrieved from the LegiScan API (getSessionPeople data).
 
-- **Error Resilience**: Continues processing when individual records fail, ensuring maximum data collection.
+Links scraped memberships to official legislator_id based on a configurable score threshold.
 
-### Data Processing Features
+Structured Data Output:
 
-The script goes beyond data collection to prepare for analysis:
+Saves raw JSON responses from the API (per legislator, bill, vote, committee, session) and scraping (per committee, consolidated raw) in the data/raw/ directory hierarchy for auditability and reprocessing.
 
-- **Standardized CSV Generation**: Converts raw JSON to analysis-ready CSV files with consistent column structures.
+Consolidates API data per session and aggregates it into yearly JSON and CSV files (e.g., bills_2023_ID.csv, votes_2023_ID.csv) in the data/processed/ directory.
 
-- **Feature Engineering**: Calculates derived features such as party voting patterns and alignment metrics.
+Saves scraped and matched committee membership data to CSV files in data/processed/.
 
-- **Data Summarization**: Generates statistical summaries of the collected data, including vote distributions and party representation.
+Organizes raw data by type and year/session using pathlib.
 
-## Advanced Usage
+Configuration & Control:
 
-### Incremental Updates
+Requires LegiScan API key via the LEGISCAN_API_KEY environment variable.
 
-To update the dataset with new data for a specific year only:
+Accepts command-line arguments to specify state, year range, skip specific collection/processing steps (API, scraping, matching, consolidation), trigger stub functions, and override the base data directory.
 
-1. Modify the `YEARS` constant to include only the target year
-2. Run the script
-3. Merge the new processed files with existing ones
+Logging: Provides informative logging to both the console and a data_collection.log file (overwritten each run).
 
-### Feature Matrix Generation
+Extensibility Stubs: Includes placeholder functions (collect_campaign_finance, collect_district_demographics, collect_election_history) that log warnings. These explicitly indicate where integration points for separate collection scripts exist.
 
-The script automatically generates `vote_features.csv`, which includes:
+Dependencies
 
-- Basic legislator features (party, district, role)
-- Vote values (1 for yea, 0 for nay)
-- Party voting patterns (average vote by party on each bill)
-- Individual alignment metrics (agreement with party average)
+Install the required Python libraries using pip:
 
-This serves as a starting point for more sophisticated feature engineering.
+pip install requests pandas tenacity tqdm beautifulsoup4 fuzzywuzzy python-Levenshtein
 
-## Technical Details
 
-### Vote Value Encoding
+(Note: Ensure python-Levenshtein is installed for faster fuzzy matching; fuzzywuzzy will use it automatically if available.)
 
-The script standardizes vote values according to the following scheme:
+Configuration
 
-- `1`: Affirmative votes (yea, aye, yes)
-- `0`: Negative votes (nay, no)
-- `-1`: Present but not voting (abstain, present)
-- `-2`: Not present (absent, not voting)
-- `-9`: Unknown or other vote values
+API Key: Set the LEGISCAN_API_KEY environment variable before running the script.
 
-### API Rate Limiting Strategy
+Linux/macOS: export LEGISCAN_API_KEY='your_actual_api_key'
 
-To avoid triggering LegiScan's rate limits, the script:
+Windows (cmd): set LEGISCAN_API_KEY=your_actual_api_key
 
-1. Implements a base delay between requests (1 second by default)
-2. Adds random jitter (0.1-0.5 seconds) to vary request timing
-3. Detects 429 (Too Many Requests) responses
-4. Implements exponential backoff when rate limits are encountered
+Windows (PowerShell): $env:LEGISCAN_API_KEY='your_actual_api_key'
 
-### Error Handling Approach
+The script will exit with an error if this variable is not set.
 
-The script employs a multi-layered error handling strategy:
+Command-Line Arguments:
 
-1. Function-level try/except blocks capture and log specific errors
-2. The `tenacity` retry mechanism handles transient network and API issues
-3. Process-wide exception handling ensures graceful failure
-4. Comprehensive logging provides troubleshooting context
+--state STATE: State abbreviation (e.g., ID, CA). Case-insensitive input, stored internally as uppercase. (Default: ID)
 
-## Design Decisions
+--start-year YEAR: Start year for data collection (inclusive). (Default: 2010)
 
-### Raw and Processed Data Separation
+--end-year YEAR: End year for data collection (inclusive). (Default: Current Year)
 
-The dual storage approach (raw JSON + processed CSV) serves several purposes:
+--skip-api: Skip all LegiScan API data collection steps.
 
-1. **Data Integrity**: Original API responses are preserved for reference
-2. **Troubleshooting**: Raw data can be examined when processing issues occur
-3. **Flexibility**: New features can be derived from raw data without re-fetching
-4. **Efficiency**: Processed CSVs are optimized for analysis workflows
+--skip-scraping: Skip web scraping for current year committee memberships (currently only affects Idaho).
 
-### Feature Matrix Generation
+--skip-matching: Skip fuzzy matching of scraped members to API legislators.
 
-The automatic generation of a preliminary feature matrix:
+--skip-consolidation: Skip consolidation of yearly API data (bills, votes, sponsors, committees) and the consolidation of matched scraped memberships across years.
 
-1. Provides immediate value for exploratory analysis
-2. Serves as a template for more sophisticated feature engineering
-3. Validates the completeness and usability of collected data
-4. Accelerates the model development workflow
+--collect-finance: (STUB) Trigger placeholder for campaign finance collection. Logs a warning; requires a separate script like scrape_finance_idaho.py to actually collect data.
 
-### Standardized Vote Encoding
+--collect-demographics: (STUB) Trigger placeholder for demographics collection. Logs a warning; requires a separate script to implement collection/processing.
 
-The numerical encoding of votes facilitates:
+--collect-elections: (STUB) Trigger placeholder for election history collection. Logs a warning; requires a separate script to implement collection/parsing.
 
-1. Consistent treatment across varying vote terminology (yea/aye/yes)
-2. Clear differentiation between negative votes and non-votes
-3. Simplified model development (classification target is 1 or 0)
-4. Potential for treating abstentions and absences as special cases
+--data-dir PATH: Override the base data directory (default: ./data). All raw/ and processed/ subdirectories will be relative to this path.
 
-## Performance Considerations
+Directory Structure
 
-### API Efficiency
+The script creates and uses the following directory structure within the specified base data directory (default is ./data/):
 
-The script optimizes API usage by:
+<base_data_dir>/
+├── raw/
+│   ├── legislators/      # Raw JSON per legislator (e.g., 12345.json), all_legislators_{state}.json
+│   ├── committees/       # yearly subdirs (e.g., 2023/) containing raw JSON per committee (e.g., committee_678.json), session summary (e.g., committees_{session_id}.json), yearly summary (e.g., all_committees_{year}_{state}.json)
+│   ├── bills/            # yearly subdirs (e.g., 2023/) containing raw JSON per bill (e.g., bill_98765.json), session summary (e.g., bills_{session_id}.json), yearly summary (e.g., all_bills_{year}_{state}.json)
+│   ├── votes/            # yearly subdirs (e.g., 2023/) containing raw JSON per roll call (e.g., vote_{roll_call_id}.json), session summary (e.g., votes_{session_id}.json), yearly summary (e.g., all_votes_{year}_{state}.json)
+│   ├── sponsors/         # yearly subdirs (e.g., 2023/) containing session summary (e.g., sponsors_{session_id}.json), yearly summary (e.g., all_sponsors_{year}_{state}.json)
+│   ├── committee_memberships/ # yearly subdirs (e.g., 2024/) containing raw scraped JSON per committee, consolidated raw scraped JSON (e.g., scraped_memberships_raw_{state}_{year}.json), consolidated *matched* JSON (e.g., scraped_memberships_matched_{state}_{year}.json), and potentially consolidated matched across years (e.g., all_memberships_scraped_consolidated_{state}.json)
+│   ├── campaign_finance/ # (Stub) Placeholder created; data intended to be populated by separate script(s)
+│   ├── demographics/     # (Stub) Placeholder created; data intended to be populated by separate script(s)
+│   ├── elections/        # (Stub) Placeholder created; data intended to be populated by separate script(s)
+│   ├── texts/            # (Directory created, but script currently only stores text *stubs* within bill data)
+│   ├── amendments/       # (Directory created, but script currently only stores amendment *stubs* within bill data)
+│   └── supplements/      # (Directory created, but script currently only stores supplement *stubs* within bill data)
+│
+└── processed/
+    ├── legislators_{state}.csv                     # Consolidated unique legislators across all specified sessions
+    ├── committees_{year}_{state}.csv               # Consolidated committee definitions for a given year
+    ├── bills_{year}_{state}.csv                    # Consolidated bill details for a given year
+    ├── votes_{year}_{state}.csv                    # Consolidated roll call vote records for a given year
+    ├── sponsors_{year}_{state}.csv                 # Consolidated bill sponsorship records for a given year
+    ├── committee_memberships_scraped_matched_{state}_{year}.csv # Matched scraped data (typically current year only)
+    └── committee_memberships_scraped_consolidated_{state}.csv  # Consolidated matched scraped data across available years
+    # Potentially other processed files created by separate scripts later
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+Workflow
 
-1. Collecting core data (legislators, sessions) once rather than repeatedly
-2. Using appropriate bulk endpoints where available
-3. Implementing intelligent waiting between requests
-4. Storing raw data to minimize redundant API calls
+Initialization: Parses command-line arguments, sets up logging, resolves data directories, checks for API key, and creates necessary directory structures.
 
-### Processing Efficiency
+API Collection (if not --skip-api):
 
-For large datasets, consider:
+Fetches the list of relevant legislative sessions (getSessionList).
 
-1. Running the script on a machine with adequate memory (8GB+ recommended)
-2. Allocating sufficient disk space (approximately 1GB for 5 years of Idaho data)
-3. Expecting runtime of 1-3 hours depending on the volume of legislative activity
+Collects unique legislators across all identified sessions (getSessionPeople) and saves the consolidated legislators_{state}.csv.
 
-## Troubleshooting
+Iterates through each relevant session:
 
-### Common Issues
+Collects committee definitions (getCommittee).
 
-1. **API Key Errors**: Ensure your LegiScan API key is valid and has not reached usage limits
-2. **HTTP Timeouts**: Network issues may cause timeouts; the retry logic will handle most cases
-3. **Disk Space**: Ensure sufficient disk space for both raw and processed data
-4. **Memory Usage**: Processing large datasets may require significant memory
+Collects master bill list (getMasterList).
 
-### Logging
+For each bill in the master list: Fetches detailed bill data (getBill), extracts bill info, sponsor records, vote stubs, text/amendment/supplement stubs.
 
-The script generates a detailed log file (`data_collection.log`) containing:
-- Information messages tracking progress
-- Warning messages for non-fatal issues
-- Error messages for failures
-- Timestamps for all events
+For each vote stub identified: Fetches detailed roll call data (getRollCall) and extracts individual legislator vote records.
 
-Review this log file to diagnose issues.
+Saves raw JSONs for individual items (legislators, bills, votes, committees) and session-level JSON summaries in the raw/ subdirectories.
 
-## Future Enhancements
+Web Scraping (if not --skip-scraping and state is supported, e.g., 'ID'):
 
-The data collection module could be extended in several ways:
+Fetches HTML from the configured state legislature's committee pages (Idaho only currently).
 
-1. **Parallel Processing**: Implement multi-threading for concurrent API requests
-2. **Incremental Updates**: Add smart detection of already-collected data
-3. **Text Analysis**: Extract features from bill text using NLP techniques
-4. **Historical Expansion**: Extend data collection to earlier years for trend analysis
-5. **Cross-State Comparison**: Add support for collecting data from neighboring states
+Parses the HTML using BeautifulSoup to extract committee names and member lists (names, roles). This step is fragile.
 
-## Conclusion
+Saves raw scraped data (including member names) to JSON files in raw/committee_memberships/{year}/. Returns the path to a consolidated raw scraped JSON file for the current year.
 
-The Valley Vote data collection module provides a robust foundation for the legislative vote prediction platform. By gathering comprehensive, well-structured data, it enables the development of accurate and interpretable machine learning models to predict legislative behavior in Idaho.
+Matching (if not --skip-matching and scraping occurred or relevant raw file exists):
+
+Loads the raw (flat) scraped membership list JSON for the current year.
+
+Loads the consolidated legislator JSON (all_legislators_{state}.json) created during the API phase.
+
+Uses fuzzywuzzy to match scraped legislator_name_scraped against the official name field from the legislator data.
+
+Adds legislator_id, matched_api_name, and match_score to the membership records.
+
+Saves the updated membership list with matching info to a new "_matched.json" file in raw/committee_memberships/{year}/.
+
+Saves the final matched data to processed/committee_memberships_scraped_matched_{state}_{year}.csv.
+
+Consolidation (if not --skip-consolidation):
+
+API Data: Aggregates session-level API data (bills, votes, sponsors, committees) from the raw JSON files into yearly CSV files (processed/*_{year}_{state}.csv) and yearly JSON summaries (raw/.../all_*_{year}_{state}.json).
+
+Scraped Data: Aggregates the matched scraped committee membership CSVs (processed/committee_memberships_scraped_matched_{state}_{year}.csv) from available years into a single consolidated CSV (processed/committee_memberships_scraped_consolidated_{state}.csv) and a corresponding JSON in the raw directory.
+
+Stub Function Calls (if corresponding --collect-* flags are enabled): Logs warning messages indicating these collection steps need implementation via separate scripts. Creates the placeholder raw directories if they don't exist.
+
+Completion: Logs total execution time and shuts down logging.
+
+Output Files
+
+The script primarily generates:
+
+Raw JSON files: Individual records (legislator, bill, vote, committee) and session/yearly summaries stored under data/raw/. These are crucial for retaining the original data structure and for reprocessing if needed.
+
+Processed CSV files: Yearly consolidated data suitable for analysis and input into preprocessing scripts, stored under data/processed/. Key outputs include:
+
+data/processed/legislators_{STATE}.csv
+
+data/processed/bills_{YEAR}_{STATE}.csv
+
+data/processed/votes_{YEAR}_{STATE}.csv
+
+data/processed/sponsors_{YEAR}_{STATE}.csv
+
+data/processed/committees_{YEAR}_{STATE}.csv
+
+data/processed/committee_memberships_scraped_matched_{STATE}_{YEAR}.csv (Result of scraping + matching, typically current year)
+
+data/processed/committee_memberships_scraped_consolidated_{STATE}.csv (Combines matched data across available years)
+
+Stub Functions for Future Data Sources
+
+This script includes non-functional placeholders for collecting additional data critical for robust vote prediction. These stubs simply log a warning when triggered by their respective command-line flags:
+
+collect_campaign_finance() (--collect-finance): Intended to collect donation data. Requires a separate, dedicated script like scrape_finance_idaho.py (provided as an example) to handle the complexities of state-specific campaign finance portals (e.g., Idaho Sunshine Portal).
+
+collect_district_demographics() (--collect-demographics): Intended to process Census data (ACS) and TIGER/Line shapefiles. Requires a separate script utilizing geospatial libraries (like geopandas).
+
+collect_election_history() (--collect-elections): Intended to parse state election result files (often PDFs or specific formats). Requires a separate script with custom parsing logic for the target state's files.
+
+The decision to handle these via separate scripts is due to their state-specific nature, reliance on different technologies (web scraping, GIS, PDF parsing), and overall complexity, keeping data_collection.py focused on the core LegiScan API interaction.
+
+Limitations
+
+Web Scraping Fragility: The committee membership scraping is hardcoded for the Idaho Legislature website structure (as observed in early 2024) and is highly likely to break if the site layout changes. Adding support for other states requires writing new, state-specific scraping and parsing logic.
+
+No Feature Engineering: This script focuses solely on data acquisition and basic structuring/consolidation. It does not perform feature engineering (e.g., calculating legislator influence scores, party loyalty, text analysis features) or complex data merging required for modeling. These tasks should occur in a dedicated preprocessing script (e.g., data_preprocessing.py).
+
+Stub Implementation: The functions for collecting campaign finance, demographics, and election history are placeholders only and do not collect any actual data. Their corresponding command-line flags only serve to trigger warning messages.
+
+API Rate Limits/Costs: LegiScan has usage limits. Extensive data collection across many years or states may require a paid plan or careful management of request frequency.
+
+Usage Examples
+# --- Common Use Cases ---
+
+# Collect data for Idaho for years 2022-2024, including scraping & matching for current year
+python data_collection.py --state ID --start-year 2022 --end-year 2024
+
+# Collect data for California for 2023 only (scraping/matching not implemented for CA, so effectively skipped)
+python data_collection.py --state CA --start-year 2023 --end-year 2023
+
+# --- Skipping Specific Steps ---
+
+# Collect only API data for Idaho 2023, skip scraping, matching, and consolidation
+python data_collection.py --state ID --start-year 2023 --end-year 2023 --skip-scraping --skip-matching --skip-consolidation
+
+# Run ONLY scraping and matching for Idaho (assumes API data exists from previous run)
+# Useful for updating committee memberships if the website changed
+python data_collection.py --state ID --start-year 2024 --end-year 2024 --skip-api --skip-consolidation
+
+# Run ONLY consolidation (assumes yearly API files and matched scraped files exist)
+python data_collection.py --state ID --start-year 2020 --end-year 2024 --skip-api --skip-scraping --skip-matching
+
+# --- Using Other Options ---
+
+# Run for Idaho 2023, override data directory, and trigger (non-functional) stub collectors
+python data_collection.py --state ID --start-year 2023 --end-year 2023 \
+    --data-dir /mnt/volume/valley_vote_data \
+    --collect-finance --collect-demographics --collect-elections
+
+# Get help on all arguments
+python data_collection.py --help
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Bash
+IGNORE_WHEN_COPYING_END

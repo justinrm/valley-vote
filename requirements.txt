@@ -1,10 +1,35 @@
-requests==2.31.0
-pandas==2.2.1
-tenacity==8.2.3
-tqdm==4.66.2
-scikit-learn==1.4.0
-xgboost==2.0.3
-mlflow==2.10.0
-shap==0.44.0
-redis==5.0.1
-docker==7.0.0
+# Requirements for the Valley Vote Project
+# Generated on 04/05/2025
+
+# --- Core Data Collection & Scraping ---
+setuptools>=65.5.1        # Required for package installation and setup.py
+requests>=2.25.1          # For HTTP requests (API, Scraping)
+pandas>=1.3.0             # Data manipulation and CSV I/O
+tenacity>=8.0.1           # Retry logic for API calls and scraping
+tqdm>=4.61.0              # Progress bars for loops
+beautifulsoup4>=4.9.3    # HTML parsing for web scraping
+fuzzywuzzy~=0.18.0        # Fuzzy string matching (e.g., legislator names)
+python-Levenshtein>=0.12.2 # Performance enhancement for fuzzywuzzy (requires C build tools)
+
+# --- Data Processing & Feature Engineering (Includes Core & Planned) ---
+numpy~=1.26.4             # Numerical operations (dependency of pandas, good to pin)
+scikit-learn~=1.4.2       # Preprocessing, modeling utilities, evaluation metrics
+geopandas~=0.14.3         # Geospatial data handling (Planned for demographics)
+# Note: Installing geopandas can be complex due to C dependencies (GDAL, GEOS, PROJ).
+# Using Conda (conda install geopandas) is often recommended.
+# Explicitly listing key geopandas dependencies for clarity, versions align with geopandas 0.14.x
+shapely~=2.0.3            # Geospatial geometry operations
+fiona~=1.9.6              # Reading/writing geospatial data formats
+pyproj~=3.6.1             # Projections and coordinate transformations
+
+# --- Modeling & Interpretation (Planned) ---
+xgboost~=2.0.3            # Gradient Boosting model (Primary planned model)
+shap~=0.45.0              # Model interpretation (SHAP values)
+matplotlib~=3.8.3         # Plotting library (for evaluation, SHAP plots)
+seaborn~=0.13.2           # Enhanced plotting based on matplotlib
+
+# --- Optional Tools (Based on Planned Features/Workflow) ---
+# optuna~=3.6.1             # (Optional) Hyperparameter optimization framework
+# mlflow~=2.11.3            # (Optional) Experiment tracking and model management
+# flask~=3.0.2              # (Optional) Web framework for simple prediction API
+# streamlit~=1.34.0         # (Optional) Web framework for interactive dashboard/interface

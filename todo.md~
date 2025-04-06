@@ -1,368 +1,104 @@
-# TODO.md: Valley Vote - Idaho Legislative Vote Prediction Platform
-
-This `TODO.md` outlines the development roadmap for building the Valley Vote platform to collect Idaho legislative data, train machine learning models to predict vote likelihood, and provide a user-friendly interface for exploring predictions. The project is divided into six sprints, each with specific tasks and details to ensure efficient, scalable development.
-
----
-
-## Sprint 1: Project Setup and Enhanced Data Collection (Estimated: 1-2 weeks)
-
-### Tasks:
-1. **Set Up Project Structure**
-   - Create a new Git repository for version control.
-   - Set up a Python virtual environment using `venv` or `conda`.
-   - Organize the project directories:
-     ```
-     /valley-vote
-     ├── data/
-     │   ├── raw/
-     │   │   ├── legislators/
-     │   │   ├── bills/
-     │   │   ├── votes/
-     │   │   ├── committees/
-     │   │   ├── committee_memberships/
-     │   │   └── sponsors/
-     │   ├── processed/
-     │   ├── models/
-     │   └── outputs/
-     ├── src/
-     ├── frontend/
-     ├── notebooks/
-     └── docs/
-     ```
-   - Initialize a `README.md` and this `TODO.md` in the root.
-
-2. **Set Up Dependency Management**
-   - Create a `requirements.txt` file with necessary packages:
-     - `requests`, `pandas`, `tenacity`, `tqdm`, `scikit-learn`, `xgboost`, `mlflow`, `shap`
-   - Create a `setup.py` for potential packaging.
-
-3. **Configure LegiScan API Access**
-   - Sign up for a LegiScan API key if not already available.
-   - Create a secure configuration management system for storing the API key.
-   - Review the API documentation to understand all available endpoints.
-
-4. **Implement Enhanced Data Collection**
-   - Deploy the enhanced `src/data_collection.py` script with:
-     - Comprehensive error handling and retry logic
-     - Detailed logging system
-     - Progress tracking with `tqdm`
-     - Rate limit management
-   - Create a documentation file (`readme_data_collection.md`) explaining the data collection system.
-
-5. **Execute Initial Data Collection**
-   - Run the data collection script to gather the 2020-2024 dataset.
-   - Verify data integrity and completeness.
-   - Generate and review data summary statistics.
-
-### Notes:
-- Implement structured logging with both file and console outputs.
-- Document the data directory structure and file formats in detail.
-- Create a test suite for the data collection module to ensure reliability.
-
----
-
-## Sprint 2: Data Processing and Advanced Feature Engineering (Estimated: 2-3 weeks)
-
-### Tasks:
-1. **Implement Data Cleaning Module**
-   - Write a script (`src/data_cleaning.py`) to:
-     - Handle missing values through context-aware imputation.
-     - Standardize formats across different data types.
-     - Remove duplicates while preserving data integrity.
-     - Correct inconsistencies in legislator and bill identifiers.
-   - Create unit tests for cleaning operations.
-
-2. **Develop Advanced Feature Engineering**
-   - Create a script (`src/feature_engineering.py`) to generate features, including:
-     - **Legislator-based**: party affiliation, demographics, district characteristics, committee leadership roles, tenure.
-     - **Bill-based**: topic classification, complexity metrics, sponsor influence score, similar bill history.
-     - **Network-based**: co-sponsorship networks, committee relationship strength, partisan collaboration scores.
-     - **Temporal**: vote timing patterns, session progress indicators, proximity to elections.
-   - Implement feature selection methods to identify most predictive features.
-
-3. **Create Feature Store**
-   - Develop a feature storage system that enables:
-     - Consistent feature application across training and inference.
-     - Feature versioning and lineage tracking.
-     - Easy addition of new features without reprocessing all data.
-   - Save standardized feature matrices in `data/processed/`.
-
-4. **Implement Data Validation**
-   - Create data validation checks to ensure consistency.
-   - Generate data quality reports highlighting potential issues.
-   - Implement schema enforcement for processed datasets.
-
-### Notes:
-- Use feature pipelines to ensure reproducibility.
-- Document the feature engineering logic and rationale in `docs/feature_engineering.md`.
-- Create Jupyter notebooks to visualize and analyze the engineered features.
-
----
-
-## Sprint 3: Model Development and Evaluation (Estimated: 2-3 weeks)
-
-### Tasks:
-1. **Set Up Machine Learning Infrastructure**
-   - Configure MLflow for experiment tracking.
-   - Create reproducible training pipelines.
-   - Set up cross-validation strategies with temporal considerations.
-
-2. **Implement Baseline Models**
-   - Develop logistic regression as the baseline.
-   - Implement stratified sampling to handle class imbalance.
-   - Evaluate using F1-score, AUC-ROC, and precision-recall curves.
-
-3. **Develop Advanced Models**
-   - Implement and train:
-     - Random Forests with hyperparameter tuning
-     - XGBoost with early stopping
-     - Neural networks for complex feature interaction learning
-   - Log all experiments with parameters, metrics, and validation results.
-
-4. **Create Model Interpretability Module**
-   - Implement SHAP value calculation for feature importance.
-   - Create visualizations to explain model decisions.
-   - Develop legislator-specific and bill-specific explanations.
-   - Analyze and document any potential biases in the model.
-
-5. **Build Model Selection Framework**
-   - Create metrics for model comparison beyond accuracy.
-   - Evaluate models on specific subsets (e.g., by party, by topic).
-   - Select and serialize the best model to `data/models/`.
-
-### Notes:
-- Ensure all random processes are seeded for reproducibility.
-- Create a comprehensive model evaluation report template.
-- Document the rationale for model selection in `docs/model_selection.md`.
-
----
-
-## Sprint 4: API Development and Backend Services (Estimated: 2-3 weeks)
-
-### Tasks:
-1. **Design RESTful API Architecture**
-   - Define API contract with OpenAPI/Swagger specifications.
-   - Plan endpoints for:
-     - Legislator information and voting history
-     - Bill details and historical vote breakdowns
-     - Vote prediction requests with confidence scores
-     - Feature importance and explanation queries
-   - Create API documentation in `docs/api_spec.md`.
-
-2. **Implement Backend Services**
-   - Develop a FastAPI application with:
-     - Asynchronous request handling
-     - Request validation and error handling
-     - JWT authentication and role-based access control
-     - Rate limiting and security headers
-   - Create service modules for:
-     - Data access layer
-     - Prediction service
-     - Explanation service
-     - User management
-
-3. **Develop Data Update System**
-   - Create an automated pipeline to:
-     - Fetch new legislative data daily during active sessions
-     - Update the feature store with new data
-     - Trigger model retraining when appropriate
-   - Implement change detection to optimize updates.
-
-4. **Create Caching Layer**
-   - Implement Redis caching for frequent queries.
-   - Define cache invalidation strategies for data updates.
-   - Optimize query performance for dashboard visualizations.
-
-### Notes:
-- Use dependency injection for testable service components.
-- Document API endpoints with response examples.
-- Create a deployment configuration for containerization.
-
----
-
-## Sprint 5: Frontend Development and User Experience (Estimated: 2-4 weeks)
-
-### Tasks:
-1. **Design User Interface**
-   - Create wireframes for key screens:
-     - Dashboard overview
-     - Legislator profiles
-     - Bill analysis page
-     - Prediction explorer
-   - Develop a consistent design system with accessibility considerations.
-
-2. **Implement React Frontend**
-   - Set up a React application with TypeScript.
-   - Install and configure:
-     - State management (Redux Toolkit or Context API)
-     - Routing (React Router)
-     - Form handling (React Hook Form)
-     - Data visualization (D3.js, Chart.js)
-   - Implement responsive layouts with a mobile-first approach.
-
-3. **Develop Interactive Visualizations**
-   - Create visualizations including:
-     - Vote prediction probability charts
-     - Feature importance displays
-     - Historical voting pattern comparisons
-     - Network graphs of legislative relationships
-     - District maps with voting patterns
-   - Ensure visualizations are interactive and responsive.
-
-4. **Build Advanced Search and Filtering**
-   - Implement search functionality across legislators and bills.
-   - Create advanced filtering options:
-     - By committee, topic, party, and region
-     - By prediction confidence
-     - By voting pattern similarities
-   - Add pagination and sorting capabilities.
-
-5. **Implement User Accounts and Preferences**
-   - Create account system for saving preferences.
-   - Implement customizable dashboards and alerts.
-   - Add export functionality for reports and data.
-
-### Notes:
-- Test the UI with real users from diverse backgrounds.
-- Ensure keyboard navigation and screen reader compatibility.
-- Document the component structure in `docs/frontend_architecture.md`.
-
----
-
-## Sprint 6: Testing, Deployment, and Launch (Estimated: 2-3 weeks)
-
-### Tasks:
-1. **Implement Comprehensive Testing**
-   - Develop unit tests for all core modules.
-   - Create integration tests for API endpoints.
-   - Implement end-to-end tests for critical user flows.
-   - Set up continuous integration with GitHub Actions.
-
-2. **Enhance Security Measures**
-   - Conduct security audit and vulnerability scanning.
-   - Implement:
-     - Input validation and output encoding
-     - HTTPS enforcement
-     - CSRF protection
-     - Rate limiting for API endpoints
-     - Secure storage of credentials
-   - Document security measures in `docs/security.md`.
-
-3. **Optimize Performance**
-   - Profile API performance and optimize slow endpoints.
-   - Implement database query optimization.
-   - Add CDN integration for static assets.
-   - Set up monitoring and alerting for performance issues.
-
-4. **Deploy Application**
-   - Create Docker containers for backend services.
-   - Configure AWS infrastructure:
-     - EC2 instances or ECS for containerized services
-     - RDS for database
-     - S3 for static assets
-     - CloudFront for CDN
-   - Deploy frontend to Netlify or Vercel.
-   - Set up staging and production environments.
-
-5. **Establish Monitoring and Maintenance**
-   - Implement logging and monitoring with Prometheus and Grafana.
-   - Set up error tracking with Sentry.
-   - Create automated backups and disaster recovery procedures.
-   - Document operational procedures in `docs/operations.md`.
-
-6. **Launch and Initial Marketing**
-   - Prepare press release and social media announcements.
-   - Create user guides and tutorial videos.
-   - Reach out to potential stakeholders in Idaho politics.
-   - Set up feedback channels for users.
-
-### Notes:
-- Create a launch checklist to ensure all components are production-ready.
-- Establish criteria for measuring post-launch success.
-- Plan for regular maintenance windows and updates.
-
----
-
-## Ongoing Development and Future Enhancements
-
-### Tasks:
-1. **Collect User Feedback and Iterative Improvements**
-   - Implement analytics to track feature usage.
-   - Conduct user surveys and interviews.
-   - Prioritize features based on user feedback.
-
-2. **Expand Data Sources**
-   - Integrate additional contextual data:
-     - Campaign finance information
-     - Demographic data for districts
-     - Public statements and social media
-     - Legislative effectiveness metrics
-   - Document data integration in `docs/data_sources.md`.
-
-3. **Enhance Prediction Models**
-   - Experiment with ensemble methods combining multiple models.
-   - Implement deep learning approaches for text analysis of bill content.
-   - Develop specialized models for different types of legislation.
-   - Create models for predicting amendment outcomes.
-
-4. **Build Advanced Analytics Features**
-   - Develop coalition analysis tools.
-   - Create "what-if" scenarios for legislation changes.
-   - Implement trend analysis for shifting voting patterns.
-   - Add constituent impact assessment tools.
-
-5. **Consider Multi-State Expansion**
-   - Research feasibility of adding neighboring states.
-   - Design a scalable architecture for multi-state support.
-   - Identify common features across state legislatures.
-   - Create migration plan for expanding the platform.
-
-### Notes:
-- Plan regular model retraining and evaluation cycles.
-- Consider forming an advisory board of political scientists and civic technologists.
-- Explore potential partnerships with media organizations and academic institutions.
-- Establish ethical guidelines for platform use and prediction transparency.
-
----
-
-## Project Management and Documentation
-
-### Tasks:
-1. **Maintain Comprehensive Documentation**
-   - Create and update:
-     - Installation and setup guides
-     - API documentation
-     - User manuals
-     - Development guides
-     - Architectural diagrams
-   - Implement documentation versioning.
-
-2. **Establish Development Workflow**
-   - Define branching strategy (e.g., GitFlow).
-   - Create pull request templates and review guidelines.
-   - Set up automated code formatting and linting.
-   - Implement semantic versioning for releases.
-
-3. **Track Project Metrics**
-   - Monitor:
-     - Code coverage for tests
-     - API response times
-     - Model prediction accuracy over time
-     - User engagement metrics
-   - Create dashboards for key performance indicators.
-
-4. **Conduct Regular Reviews**
-   - Schedule bi-weekly code reviews.
-   - Hold monthly architecture reviews.
-   - Perform quarterly security assessments.
-   - Plan semi-annual roadmap updates.
-
-### Notes:
-- Use issue tracking to maintain prioritized backlog.
-- Create templates for common documentation needs.
-- Establish coding standards and contribution guidelines.
-- Document decisions and their rationale.
-
----
-
-This enhanced `TODO.md` provides a comprehensive roadmap for developing the Valley Vote platform. Each sprint builds logically on previous work, with clear tasks and strategic considerations. By following this plan, you'll create a robust, scalable, and ethical platform for predicting legislative vote outcomes in Idaho.
+
+# Project TODO List: Valley Vote (Legislative Vote Prediction)
+
+This document tracks the tasks required to build and improve the legislative vote prediction model.
+
+## Phase 1: Enhanced Data Acquisition
+
+*Core LegiScan API collection and basic scraping are complete via `data_collection.py`.*
+
+-   [x] Implement core LegiScan API fetching (Sessions, Legislators, Committees, Bills, Votes, Sponsors) (`data_collection.py`)
+-   [x] Implement basic committee membership web scraping (Idaho specific) (`data_collection.py`)
+-   [x] Implement fuzzy name matching for scraped committee members (`data_collection.py`)
+-   [x] Implement data structuring and saving (Raw JSONs, Processed CSVs) (`data_collection.py`)
+-   [x] Implement basic consolidation of yearly API/scraped data (`data_collection.py`)
+-   [x] **Implement Campaign Finance Scraper/Collector (`scrape_finance_idaho.py` or similar)**
+    -   [x] Target Idaho Sunshine portal (or relevant state source).
+    -   [x] Identify legislator/candidate filings.
+    -   [x] Extract contributions (amount, date, donor, donor industry/type if possible).
+    -   [~] Extract expenditures (optional).
+    -   [x] Save raw scraped data/extractions.
+    -   [x] Develop strategy for robustly matching finance records (candidate names) to LegiScan `legislator_id`.
+-   [ ] **Implement Demographics Collector/Processor (`process_demographics_idaho.py` or similar)**
+    -   [ ] Identify and download relevant Census ACS tables (income, education, age, race etc.).
+    -   [ ] Identify and download TIGER/Line shapefiles for state legislative districts.
+    -   [ ] Use `geopandas` (or similar GIS tools) to spatially join Census data to district boundaries.
+    -   [ ] Aggregate demographic statistics per legislative district.
+    -   [ ] Save processed demographics per district (e.g., CSV or GeoJSON).
+-   [ ] **Implement Election History Parser (`parse_elections_idaho.py` or similar)**
+    -   [ ] Identify and download historical election result files (e.g., from `voteidaho.gov`).
+    -   [ ] Parse relevant file formats (Excel, CSV).
+    -   [ ] Extract results for state legislative races (candidate, party, votes, total votes, district, year).
+    -   [ ] Calculate margin of victory / vote share.
+    -   [ ] Develop strategy for robustly matching election candidates to LegiScan `legislator_id`.
+    -   [ ] Save raw parsed data and/or processed results.
+-   [ ] (Optional) Refine state-specific web scrapers for robustness or add support for other states.
+-   [ ] (Optional) Implement caching for API calls and web requests to improve speed and reduce load.
+
+## Phase 2: Preprocessing & Feature Engineering
+
+*This phase focuses on cleaning, merging, and creating features from the collected data.*
+
+-   [ ] **Create `data_preprocessing.py` script:** This will be the central script for this phase.
+-   [ ] **Implement Master Data Loading:** Load all relevant processed CSVs from Phase 1 (`legislators`, `votes`, `bills`, `committees`, `sponsors`, matched memberships, finance, demographics, elections).
+-   [ ] **Implement Robust Data Linking:**
+    -   [ ] Finalize matching logic for campaign finance records to `legislator_id`.
+    -   [ ] Finalize matching logic for election history records to `legislator_id`.
+    -   [ ] Ensure consistent `legislator_id`, `bill_id`, `vote_id`, `committee_id`, `district_id` across datasets.
+-   [ ] **Implement Data Cleaning:**
+    -   [ ] Handle missing values appropriately (imputation, removal).
+    *   [ ] Standardize data formats (dates, text).
+    *   [ ] Address inconsistencies found during EDA.
+-   [ ] **Implement Feature Engineering:**
+    -   [ ] **Calculate Legislative Influence Score:** Define and compute score based on factors like bills sponsored/passed, committee leadership roles (chair, vice-chair), seniority (requires tracking terms/sessions).
+    -   [ ] Engineer features from **votes:** Lagged vote history, voting patterns.
+    -   [ ] Engineer features from **bills:** Subject matter categories (e.g., one-hot encode `subjects`), bill complexity (e.g., length of text - needs fetching bill text).
+    -   [ ] Engineer features from **committees:** Legislator's committee assignments (one-hot), committee influence/type.
+    -   [ ] Engineer features from **demographics:** Link district demographics to legislators/votes.
+    -   [ ] Engineer features from **campaign finance:** Donor industry influence, contribution amounts/patterns.
+    -   [ ] Engineer features from **election history:** Margin of victory, district competitiveness.
+    -   [ ] Engineer features related to **party:** Party alignment scores, voting with/against party majority.
+-   [ ] **Generate Final Feature Matrix:** Create the final dataset (`voting_data.csv` or similar) with target variable (`vote_value` 0/1) and all engineered features, ready for modeling. Filter out non-binary votes (abstain, absent etc.) unless explicitly modeling them.
+
+## Phase 3: Modeling (XGBoost Focus)
+
+*This phase focuses on building and training the predictive model.*
+
+-   [ ] **Create `xgboost_model.py` script** (or Jupyter Notebook for exploration).
+-   [ ] Load the final feature matrix from Phase 2.
+-   [ ] Implement data splitting strategy (e.g., time-based split for legislative sessions, standard train/validation/test).
+-   [ ] Handle categorical features for XGBoost (e.g., One-Hot Encoding, potentially Target Encoding with care).
+-   [ ] Implement XGBoost model training.
+-   [ ] Perform hyperparameter tuning (e.g., using GridSearchCV, RandomizedSearchCV, or Optuna).
+-   [ ] Save the trained model artifact (e.g., using `joblib` or XGBoost's internal save methods).
+-   [ ] Implement feature importance analysis (using XGBoost's built-in importance and/or SHAP).
+-   [ ] (Optional) Experiment with baseline models (e.g., Logistic Regression) for comparison.
+-   [ ] (Optional) Experiment with other tree-based models (Random Forest, LightGBM) or ensembles.
+
+## Phase 4: Evaluation & Deployment
+
+*This phase focuses on assessing model performance and potentially deploying it.*
+
+-   [ ] Implement robust model evaluation using appropriate metrics (Accuracy, Precision, Recall, F1-score, ROC-AUC).
+-   [ ] Perform evaluation on the hold-out test set.
+-   [ ] Analyze model predictions (e.g., confusion matrix, calibration plots).
+-   [ ] Implement cross-validation during training/tuning for more reliable performance estimates.
+-   [ ] (Optional) Set up experiment tracking (e.g., MLflow) to log parameters, metrics, and model artifacts.
+-   [ ] (Optional) Develop a simple prediction interface (e.g., a function to predict votes on new bills, or a basic Flask API).
+-   [ ] (Optional) Design and implement a strategy for model retraining and monitoring.
+
+## Phase 5: Documentation & Maintenance
+
+*Ongoing tasks to ensure project quality and usability.*
+
+-   [x] Create initial `data_collection_readme.md`.
+-   [x] Create initial project `TODO.md`.
+-   [ ] **Update Documentation:** Keep READMEs for each script (`data_collection`, `preprocessing`, `modeling`) updated as features are added/changed.
+-   [ ] **Update Main Project README:** Ensure the top-level README provides a good overview, links to other docs, and setup instructions.
+-   [ ] **Document Data Schema:** Create `docs/data_schema.md` describing the fields in the key processed CSV files.
+-   [ ] **Document Feature Engineering:** Create `docs/feature_engineering.md` explaining how key features (like Influence Score) are calculated.
+-   [ ] **Add Code Comments:** Ensure code is well-commented.
+-   [ ] **Add Unit/Integration Tests:** Implement tests for critical functions (API parsing, matching logic, feature calculations).
+-   [ ] **Maintain `requirements.txt`:** Keep the list of dependencies up-to-date.
+-   [ ] **Refactor Code:** Improve code quality, efficiency, and readability as needed.
+-   [ ] Monitor data sources (API changes, website structure changes) and update collectors/parsers accordingly.

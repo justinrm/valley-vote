@@ -1,0 +1,2062 @@
+# data_collection.py
+# Standard library imports
+import os
+import json
+import time
+import random
+import logging
+import argparse
+from datetime import datetime
+import sys
+from pathlib import Path  # Use pathlib for easier path manipulation
+
+# Third-party imports
+# Requires: pip install requests pandas tenacity tqdm beautifulsoup4 thefuzz python-Levenshtein
+import requests
+import pandas as pd
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tqdm import tqdm
+from bs4 import BeautifulSoup
+from thefuzz import process
+
+# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        # Overwrite log file each run
+        logging.FileHandler('data_collection.log', mode='w'),
+        logging.StreamHandler(sys.stdout)  # Ensure logs go to console
+    ]
+)
+logger = logging.getLogger('data_collection')
+
+# --- Configuration ---
+# IMPORTANT: Set the LEGISCAN_API_KEY environment variable for authentication.
+API_KEY = os.environ.get('LEGISCAN_API_KEY')
+if not API_KEY:
+    logger.error("FATAL: LEGISCAN_API_KEY environment variable not set.")
+    sys.exit("Please set the LEGISCAN_API_KEY environment variable.")
+
+BASE_URL = 'https://api.legiscan.com/'
+DEFAULT_YEARS_START = 2010
+CURRENT_YEAR = datetime.now().year
+# Default to current year + 1 to include current year
+DEFAULT_YEARS_END = CURRENT_YEAR + 1
+# Use pathlib for base directories
+BASE_DATA_DIR = Path('data')  # Default base directory
+RAW_DIR = BASE_DATA_DIR / 'raw'
+PROCESSED_DIR = BASE_DATA_DIR / 'processed'
+MAX_RETRIES = 5
+# Slightly increased default wait for API politeness (Legiscan can be sensitive)
+DEFAULT_WAIT = 1.1
+FUZZY_MATCH_THRESHOLD = 85  # Score for matching scraped names to legislator names
+
+# --- Data Directories Structure (using pathlib) ---
+# These will be updated if --data-dir is used
+RAW_LEGISLATORS_DIR = RAW_DIR / 'legislators'
+RAW_BILLS_DIR = RAW_DIR / 'bills'
+RAW_VOTES_DIR = RAW_DIR / 'votes'
+RAW_COMMITTEES_DIR = RAW_DIR / 'committees'
+RAW_COMMITTEE_MEMBERSHIPS_DIR = RAW_DIR / 'committee_memberships'
+RAW_SPONSORS_DIR = RAW_DIR / 'sponsors'
+RAW_CAMPAIGN_FINANCE_DIR = RAW_DIR / 'campaign_finance'
+RAW_DEMOGRAPHICS_DIR = RAW_DIR / 'demographics'
+RAW_ELECTIONS_DIR = RAW_DIR / 'elections'
+# Note: Raw Texts/Amendments/Supplements could be added if fetching full documents
+RAW_TEXTS_DIR = RAW_DIR / 'texts'
+RAW_AMENDMENTS_DIR = RAW_DIR / 'amendments'
+RAW_SUPPLEMENTS_DIR = RAW_DIR / 'supplements'
+PROCESSED_DATA_DIR = PROCESSED_DIR
+
+# Dictionary of all managed directories (will be updated by --data-dir)
+# Using strings for keys for consistency with previous version and consolidation logic
+DATA_DIRS = {
+    'legislators': RAW_LEGISLATORS_DIR,
+    'bills': RAW_BILLS_DIR,
+    'votes': RAW_VOTES_DIR,
+    'committees': RAW_COMMITTEES_DIR,
+    'committee_memberships': RAW_COMMITTEE_MEMBERSHIPS_DIR,
+    'sponsors': RAW_SPONSORS_DIR,
+    'campaign_finance': RAW_CAMPAIGN_FINANCE_DIR,
+    'demographics': RAW_DEMOGRAPHICS_DIR,
+    'elections': RAW_ELECTIONS_DIR,
+    'texts': RAW_TEXTS_DIR,
+    'amendments': RAW_AMENDMENTS_DIR,
+    'supplements': RAW_SUPPLEMENTS_DIR,
+    'processed': PROCESSED_DATA_DIR
+}
+
+
+class APIRateLimitError(Exception):
+    """Custom exception for API rate limiting (HTTP 429)."""
+    pass
+
+
+class APIResourceNotFoundError(Exception):
+    """Custom exception for resources not found (often indicates end of data or bad ID)."""
+    pass
+
+# --- API Fetching Logic ---
+
+
+@retry(
+    stop=stop_after_attempt(MAX_RETRIES),
+    wait=wait_exponential(multiplier=1.5, min=2,
+                          max=60),  # Exponential backoff
+    retry=retry_if_exception_type(requests.exceptions.RequestException),
+    before_sleep=lambda retry_state: logger.warning(
+        f"Retry attempt {retry_state.attempt_number} for {
+            retry_state.args[1].get('op', 'unknown op')} "
+        f"(ID: {retry_state.args[1].get('id', 'N/A')
+           }) after error: {retry_state.outcome.exception()}"
+    )
+)
+def fetch_api_data(operation, params, wait_time=None):
+    """
+    Fetch data from LegiScan API with robust retry logic and error handling.
+
+    Args:
+        operation (str): API operation name (case-insensitive, but use manual's casing).
+        params (dict): API parameters (excluding key and op).
+        wait_time (float, optional): Override for wait time between calls.
+
+    Returns:
+        dict or None: JSON response data or None on significant failure.
+
+    Raises:
+        APIRateLimitError: If HTTP 429 is received.
+        requests.exceptions.RequestException: For severe network/HTTP issues after retries.
+        APIResourceNotFoundError: If API indicates resource not found (404 or specific API message).
+    """
+    params['key'] = API_KEY
+    params['op'] = operation
+    request_id = params.get('id', 'N/A')  # For logging
+
+    # Add small random jitter to wait time
+    sleep_duration = (
+        wait_time if wait_time is not None else DEFAULT_WAIT) + random.uniform(0.1, 0.6)
+    logger.debug(f"Sleeping for {sleep_duration:.2f}s before request for op: {
+                 operation}, id: {request_id}")
+    time.sleep(sleep_duration)
+
+    try:
+        logger.info(f"Fetching {operation} for id: {request_id}")
+        log_params = {k: v for k, v in params.items() if k != 'key'}
+        logger.debug(f"Request params: {log_params}")
+        response = requests.get(BASE_URL, params=params,
+                                timeout=45)  # Standard timeout
+
+        # Check for Rate Limit specifically
+        if response.status_code == 429:
+            logger.warning(f"Rate limit hit (HTTP 429) for {
+                           operation}, id: {request_id}. Backing off...")
+            raise APIRateLimitError("Rate limit exceeded")
+
+        # Use raise_for_status() for other HTTP errors (4xx, 5xx)
+        response.raise_for_status()
+
+        data = response.json()
+
+        # Check Legiscan application status ('OK' or 'ERROR')
+        status = data.get('status')
+        if status == 'ERROR':
+            error_msg = data.get('alert', {}).get(
+                'message', 'Unknown API error')
+            logger.error(f"API error response for {
+                         operation} (id: {request_id}): {error_msg}")
+            # Distinguish "not found" errors - these often aren't critical failures for looping
+            # Check common phrases indicating resource absence
+            if "not found" in error_msg.lower() or \
+               "invalid id" in error_msg.lower() or \
+               "does not exist" in error_msg.lower() or \
+               "no data" in error_msg.lower():  # Add other phrases as observed
+                logger.warning(f"Resource likely not found for {
+                               operation} with id {request_id}. Skipping.")
+                raise APIResourceNotFoundError(f"Resource not found for {
+                                               operation} id {request_id}: {error_msg}")
+            # Consider other specific API errors if needed
+            return None  # Treat other API 'ERROR' statuses as recoverable failures for this specific call
+
+        elif status != 'OK':
+            # Handle cases where status is missing or unexpected, but not explicitly 'ERROR'
+             error_msg = data.get('alert', {}).get(
+                 'message', f'Unexpected API status: {status}')
+             logger.error(f"Unexpected API status for {operation} (id: {request_id}): {
+                          error_msg}. Full response status: {status}")
+             return None  # Treat as failure for this call
+
+        logger.debug(f"Successfully fetched {operation} for id: {request_id}")
+        return data
+
+    except requests.exceptions.HTTPError as e:
+        # Handle specific HTTP errors after raise_for_status()
+        # 404 is a key indicator of resource not found
+        if e.response.status_code == 404:
+            logger.warning(f"HTTP 404 Not Found for {operation} id {
+                           request_id}. Assuming resource does not exist.")
+            raise APIResourceNotFoundError(f"HTTP 404 Not Found for {
+                                           operation} id {request_id}") from e
+        # Other client errors (4xx excluding 429, 404) often mean bad request, don't retry usually
+        elif 400 <= e.response.status_code < 500 and e.response.status_code != 429:
+             logger.error(f"Client error {e.response.status_code} fetching {
+                          operation} (id: {request_id}): {e}. Check parameters.")
+             return None  # Don't retry most client errors
+        # Server errors (5xx) should be retried by tenacity
+        elif e.response.status_code >= 500:
+            logger.error(f"Server error {e.response.status_code} fetching {
+                         operation} (id: {request_id}): {e}. Will retry.")
+            raise  # Re-raise to trigger tenacity retry for server errors
+        else:
+             logger.error(f"Unhandled HTTP error fetching {
+                          operation} (id: {request_id}): {e}")
+             raise  # Re-raise unexpected HTTP errors
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Request timed out for {operation} (id: {
+                     request_id}): {str(e)}. Will retry.")
+        raise  # Re-raise to trigger tenacity retry
+    except requests.exceptions.RequestException as e:
+        # Catch other connection errors, etc.
+        logger.error(f"Request exception in {operation} (id: {
+                     request_id}): {str(e)}. Will retry.")
+        raise  # Re-raise to trigger tenacity retry
+    except json.JSONDecodeError:
+        # Log the beginning of the response text for debugging non-JSON responses
+        response_text_preview = response.text[:200] if response and hasattr(
+            response, 'text') else "N/A"
+        logger.error(f"Invalid JSON response from {operation} (id: {request_id}). Status: {
+                     response.status_code if response else 'N/A'}. Response text preview: {response_text_preview}...")
+        return None  # Cannot process, treat as failure for this call
+
+# --- File Operations ---
+
+
+def save_json(data, path):
+    """Save data as JSON file, creating directories if needed."""
+    try:
+        # Ensure path is a Path object for consistency
+        filepath = Path(path)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with filepath.open('w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        logger.debug(f"Saved JSON to {filepath}")
+        return True
+    except TypeError as e:
+        logger.error(f"TypeError saving JSON to {path}: {
+                     str(e)}. Data type: {type(data)}")
+        return False
+    except Exception as e:
+        logger.error(f"Error saving JSON to {path}: {str(e)}")
+        return False
+
+
+def convert_to_csv(data, csv_path, columns):
+    """Convert list of dicts to CSV with specified columns, handling empty data."""
+    try:
+        filepath = Path(csv_path)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        if not isinstance(data, list):
+            logger.error(f"Invalid data type for CSV conversion: expected list, got {
+                         type(data)}. Path: {filepath}")
+            # Create empty CSV with headers if possible
+            if columns:
+                pd.DataFrame(columns=columns).to_csv(
+                    filepath, index=False, encoding='utf-8')
+                logger.info(f"Saved empty CSV with headers to: {filepath}")
+            else:
+                 logger.warning(
+                     f"Cannot save empty CSV without headers specified for {filepath}")
+            return 0
+
+        if not data:
+            logger.info(f"No data provided to save at {
+                        filepath}. Creating empty file with headers.")
+            if columns:
+                pd.DataFrame(columns=columns).to_csv(
+                    filepath, index=False, encoding='utf-8')
+                logger.info(f"Saved empty CSV with headers to: {filepath}")
+            else:
+                # If no columns provided, create a truly empty file
+                filepath.touch()
+                logger.info(
+                    f"Saved completely empty file (no headers) to: {filepath}")
+
+            return 0
+
+        df = pd.DataFrame(data)
+
+        # Ensure all specified columns exist, fill missing with pd.NA (preferred over None/NaN for consistency)
+        for col in columns:
+            if col not in df.columns:
+                df[col] = pd.NA  # Use pandas NA
+
+        # Reorder/select columns
+        df = df[columns]
+
+        df.to_csv(filepath, index=False, encoding='utf-8')
+        logger.info(f"Saved {len(df)} rows to CSV: {filepath}")
+        return len(df)
+
+    except Exception as e:
+        logger.error(f"Error creating or saving CSV {filepath}: {str(e)}")
+        # Attempt to save an empty file with headers if error occurs mid-process
+        try:
+            if columns:
+                pd.DataFrame(columns=columns).to_csv(
+                    filepath, index=False, encoding='utf-8')
+                logger.info(
+                    f"Saved empty CSV placeholder with headers after error for: {filepath}")
+            else:
+                filepath.touch()
+                logger.info(
+                    f"Saved empty CSV placeholder (no headers) after error for: {filepath}")
+        except Exception as final_e:
+             logger.error(f"Could not even save an empty CSV placeholder for {
+                          filepath}: {final_e}")
+        return 0
+
+# --- LegiScan Data Collection Functions ---
+
+
+def get_session_list(state, years):
+    """
+    Get list of sessions for the specified state and year range.
+    API Manual Reference: getSessionList (Page 8)
+    """
+    logger.info(f"Fetching session list for {
+                state} covering years {min(years)}-{max(years)}...")
+    params = {'state': state}
+    try:
+        # API Operation name from manual: getSessionList
+        data = fetch_api_data('getSessionList', params)
+    except APIResourceNotFoundError:
+         logger.error(f"Could not find state '{
+                      state}' via API. Check state abbreviation.")
+         return []
+    except Exception as e:
+        logger.error(
+            f"Unhandled exception fetching session list for {state}: {e}")
+        return []
+
+    # Check response structure based on manual (status, sessions list)
+    if not data or data.get('status') != 'OK' or 'sessions' not in data:
+        logger.error(f"Failed to retrieve session list for state {
+                     state}. API response status: {data.get('status') if data else 'No response'}")
+        return []
+
+    sessions = []
+    target_years = set(years)
+    api_sessions = data.get('sessions', [])
+
+    # Validate sessions list format
+    if not isinstance(api_sessions, list):
+        logger.error(f"API returned unexpected format for sessions: {
+                     type(api_sessions)}. Expected list.")
+        return []
+
+    for session in api_sessions:
+         # Validate individual session structure based on manual (Page 8, 39)
+        if not isinstance(session, dict) or 'session_id' not in session:
+            logger.warning(f"Skipping invalid session entry: {session}")
+            continue
+        try:
+            # Extract key fields mentioned in manual
+            session_id = session.get('session_id')
+            year_start = int(session.get('year_start', 0))
+            # Default end to start if missing
+            year_end = int(session.get('year_end', year_start))
+            # Added field from manual
+            dataset_hash = session.get('dataset_hash')
+
+            if year_start == 0:  # Skip sessions with invalid start year
+                logger.warning(f"Skipping session with invalid year_start: {
+                               session.get('session_name')}")
+                continue
+
+            # Check for overlap with target years
+            session_years = set(range(year_start, year_end + 1))
+            if not session_years.isdisjoint(target_years):
+                # Add extracted data, including dataset_hash
+                sessions.append({
+                    'session_id': session_id,
+                    'state_id': session.get('state_id'),
+                    'year_start': year_start,
+                    'year_end': year_end,
+                    'prefile': session.get('prefile'),
+                    'sine_die': session.get('sine_die'),
+                    'prior': session.get('prior'),
+                    'special': session.get('special'),
+                    'session_tag': session.get('session_tag'),
+                    'session_title': session.get('session_title'),
+                    'session_name': session.get('session_name'),
+                    'dataset_hash': dataset_hash  # Store the dataset hash
+                })
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Skipping session due to invalid year data: {
+                           session.get('session_name')}. Error: {e}")
+            continue
+
+    if sessions:
+         logger.info(f"Found {len(sessions)} relevant sessions for {
+                     state} in specified years.")
+         # Sort by year_start descending (most recent first)
+         sessions.sort(key=lambda s: s.get('year_start', 0), reverse=True)
+    else:
+         logger.warning(f"No relevant sessions found for {
+                        state} covering {min(years)}-{max(years)}.")
+    return sessions
+
+
+def collect_legislators(state, sessions):
+    """
+    Fetch legislator data using getSessionPeople, deduplicate, save raw/processed.
+    Handles API response variations.
+    API Manual Reference: getSessionPeople (Page 28), person data structure (Page 20, 38-39)
+    """
+    logger.info(f"Collecting legislator data for {
+                state} across {len(sessions)} sessions...")
+    legislators = {}  # Use dict for deduplication by people_id
+
+    if not sessions:
+        logger.warning("No sessions provided. Cannot collect legislators.")
+        return
+
+    for session in tqdm(sessions, desc="Fetching legislators per session"):
+        session_id = session.get('session_id')
+        session_name = session.get('session_name', f'ID: {session_id}')
+        if not session_id:
+            logger.warning(f"Session missing session_id: {session_name}")
+            continue
+
+        params = {'id': session_id}
+        try:
+            # API Operation name from manual: getSessionPeople
+            data = fetch_api_data('getSessionPeople', params)
+        except APIResourceNotFoundError:
+            logger.warning(f"Session people not found for session {
+                           session_name} (ID: {session_id}). Skipping.")
+            continue
+        except Exception as e:
+            logger.error(f"Unhandled exception fetching people for session {
+                         session_name} (ID: {session_id}): {e}")
+            continue
+
+        # Validate response structure (status, sessionpeople object)
+        if not (data and data.get('status') == 'OK' and 'sessionpeople' in data):
+            logger.warning(f"Failed to get valid people list for session {session_name} (ID: {
+                           session_id}). API Status: {data.get('status') if data else 'N/A'}")
+            continue
+
+        # sessionpeople contains 'session' info and a 'people' list (Page 28)
+        session_people_list = data.get('sessionpeople', {}).get('people', [])
+
+        if not isinstance(session_people_list, list):
+            # Handle cases where 'people' is missing or not a list
+            logger.warning(f"No 'people' list found or invalid format in 'sessionpeople' for session {
+                           session_id}. Data: {str(data.get('sessionpeople'))[:100]}")
+            continue
+
+        if not session_people_list:
+             logger.info(f"No people found (empty list) for session {
+                         session_name} (ID: {session_id}).")
+             continue
+
+        # Process the list of people
+        for person in session_people_list:
+            if not isinstance(person, dict):
+                logger.warning(
+                    f"Skipping invalid person entry (not a dict): {person}")
+                continue
+
+            legislator_id = person.get('people_id')
+            # Add only if legislator_id is valid and not already seen
+            if legislator_id and legislator_id not in legislators:
+                # Extract fields based on manual (Page 20, 38-39)
+                legislators[legislator_id] = {
+                    'legislator_id': legislator_id,
+                    # Add person_hash
+                    'person_hash': person.get('person_hash'),
+                    'state_id': person.get('state_id'),
+                    'name': person.get('name', ''),
+                    'first_name': person.get('first_name', ''),
+                    'middle_name': person.get('middle_name', ''),
+                    'last_name': person.get('last_name', ''),
+                    'suffix': person.get('suffix', ''),
+                    'nickname': person.get('nickname', ''),
+                    'party_id': person.get('party_id', ''),  # Store ID
+                    'party': person.get('party', ''),  # 'D', 'R', 'I' etc.
+                    # 1=Rep, 2=Sen, 3=Joint etc.
+                    'role_id': person.get('role_id'),
+                    'role': person.get('role', ''),  # "Rep", "Sen" etc.
+                    'district': person.get('district', ''),
+                    # Flag
+                    'committee_sponsor': person.get('committee_sponsor', 0),
+                    # If committee sponsor
+                    'committee_id': person.get('committee_id', 0),
+                    'state': state.upper(),  # Ensure state is uppercase
+                    'ftm_eid': person.get('ftm_eid'),  # FollowTheMoney ID
+                    'votesmart_id': person.get('votesmart_id'),
+                    'opensecrets_id': person.get('opensecrets_id'),
+                    'knowwho_pid': person.get('knowwho_pid'),
+                    'ballotpedia': person.get('ballotpedia'),
+                    # Note: state_link and person_url (legiscan_url) are NOT part of getPerson/getSessionPeople response per manual
+                    # These might come from other sources or be constructed? For now, set to pd.NA.
+                    'state_link': pd.NA,  # Not in getSessionPeople response
+                    'legiscan_url': pd.NA,  # Not in getSessionPeople response
+                     'active': 1,  # Placeholder, may need refinement based on session context
+                }
+                # Save individual raw JSON file (using Path)
+                raw_leg_path = RAW_LEGISLATORS_DIR / f"{legislator_id}.json"
+                save_json(person, raw_leg_path)
+
+    if legislators:
+        legislator_list = list(legislators.values())
+        logger.info(f"Collected {len(legislator_list)} unique legislators for {
+                    state} across relevant sessions.")
+
+        # Define paths for consolidated files (using Path)
+        all_json_path = RAW_LEGISLATORS_DIR / f'all_legislators_{state}.json'
+        processed_csv_path = PROCESSED_DATA_DIR / f'legislators_{state}.csv'
+
+        # Save consolidated raw JSON
+        save_json(legislator_list, all_json_path)
+
+        # Define columns for processed CSV - Updated based on manual
+        csv_columns = [
+            'legislator_id', 'person_hash', 'name', 'first_name', 'middle_name', 'last_name',
+            'suffix', 'nickname', 'party_id', 'party', 'role_id', 'role',
+            'district', 'state_id', 'state', 'active', 'committee_sponsor', 'committee_id',
+            'ftm_eid', 'votesmart_id', 'opensecrets_id', 'knowwho_pid', 'ballotpedia',
+            'state_link', 'legiscan_url'  # Keep them here, will be NA
+        ]
+        # Save processed CSV
+        convert_to_csv(legislator_list, processed_csv_path, csv_columns)
+    else:
+        logger.warning(f"No legislator data collected for state {state}.")
+        # Create empty CSV placeholder (using Path)
+        processed_csv_path = PROCESSED_DATA_DIR / f'legislators_{state}.csv'
+        csv_columns = [  # Use updated columns even for empty file
+            'legislator_id', 'person_hash', 'name', 'first_name', 'middle_name', 'last_name',
+            'suffix', 'nickname', 'party_id', 'party', 'role_id', 'role',
+            'district', 'state_id', 'state', 'active', 'committee_sponsor', 'committee_id',
+            'ftm_eid', 'votesmart_id', 'opensecrets_id', 'knowwho_pid', 'ballotpedia',
+            'state_link', 'legiscan_url'
+        ]
+        convert_to_csv([], processed_csv_path, csv_columns)
+
+
+def collect_committee_definitions(session):
+    """
+    Fetch committee definitions for a session using getCommittee.
+    API Manual Reference: getCommittee (Op name listed on Page 7, no detail page)
+    """
+    session_id = session.get('session_id')
+    session_name = session.get('session_name', f'ID: {session_id}')
+    year = session.get('year_start')  # Use extracted year_start
+
+    if not session_id or not year:
+        logger.warning(f"Session missing ID or valid start year: {
+                       session_name}. Skipping committee collection.")
+        return
+
+    # Use pathlib for directories
+    year_dir = RAW_COMMITTEES_DIR / str(year)
+    year_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Collecting committee definitions for {
+                year} session: {session_name} (ID: {session_id})...")
+    params = {'id': session_id}
+    try:
+        # API Operation name: getCommittee (per Page 7)
+        data = fetch_api_data('getCommittee', params)
+    except APIResourceNotFoundError:
+         logger.warning(f"No committees found for session {
+                        session_name} (ID: {session_id}). Skipping.")
+         # Save empty list
+         save_json([], year_dir / f'committees_{session_id}.json')
+         return
+    except Exception as e:
+        logger.error(f"Unhandled exception fetching committees for session {
+                     session_name} (ID: {session_id}): {e}")
+        return
+
+    # Define paths (using Path)
+    session_committees_json_path = year_dir / f'committees_{session_id}.json'
+    # Columns align with assumed structure (manual lacks getCommittee detail)
+    committee_csv_columns = ['committee_id', 'name',
+        'chamber', 'chamber_id', 'session_id', 'year']
+
+    # Validate response structure (status, committees list/dict)
+    if not (data and data.get('status') == 'OK' and 'committees' in data):
+        logger.warning(f"Failed to retrieve valid committee definitions for session {
+                       session_id}. Status: {data.get('status') if data else 'N/A'}")
+        save_json([], session_committees_json_path)  # Save empty list
+        return
+
+    committees_data = data.get('committees', [])  # Default to empty list
+
+    # Handle potential single committee returned as dict
+    if isinstance(committees_data, dict):
+        if 'committee_id' in committees_data:
+             committees_data = [committees_data]  # Wrap it in a list
+        else:
+             logger.warning(f"Unexpected dict format for committees in session {
+                            session_id}: {str(committees_data)[:100]}")
+             committees_data = []
+
+    if not isinstance(committees_data, list):
+        logger.error(f"Unexpected committee data format for session {
+                     session_id}: {type(committees_data)}. Expected list or dict.")
+        save_json([], session_committees_json_path)
+        return
+
+    processed_committees = []
+    for committee in committees_data:
+        if not isinstance(committee, dict):
+            logger.warning(
+                f"Skipping invalid committee entry (not a dict): {committee}")
+            continue
+        committee_id = committee.get('committee_id')
+        if committee_id:
+            processed_committees.append({
+                'committee_id': committee_id,
+                # Assuming field name
+                'name': committee.get('committee_name', ''),
+                'chamber': committee.get('chamber', ''),  # 'H', 'S', 'J'
+                # Body ID for the chamber
+                'chamber_id': committee.get('chamber_id'),
+                'session_id': session_id,
+                'year': year
+            })
+            # Save individual committee raw JSON (using Path)
+            indiv_committee_path = year_dir / f"committee_{committee_id}.json"
+            save_json(committee, indiv_committee_path)
+        else:
+            logger.warning(f"Committee entry missing committee_id in session {
+                           session_id}: {committee}")
+
+    if processed_committees:
+        logger.info(f"Collected {len(
+            processed_committees)} committee definitions for session {session_id} ({year})")
+        # Save session-level list
+        save_json(processed_committees, session_committees_json_path)
+    else:
+        logger.warning(f"No valid committee definitions collected for session {
+                       session_id} ({year})")
+        # Save empty list if none found
+        save_json([], session_committees_json_path)
+
+
+def consolidate_yearly_data(data_type, years, columns, state_abbr):
+    """Consolidates individual session JSON files into yearly JSON and CSV."""
+    logger.info(f"Consolidating {data_type} data for years {
+                min(years)}-{max(years)}...")
+    # Use Path objects from DATA_DIRS
+    raw_base_dir = DATA_DIRS.get(data_type)
+    processed_base_dir = DATA_DIRS.get('processed')  # Use 'processed' key
+    if not raw_base_dir or not processed_base_dir:
+        logger.error(f"Invalid data_type '{
+                     data_type}' or missing 'processed' dir in DATA_DIRS.")
+        return
+
+    for year in tqdm(years, desc=f"Consolidating {data_type} for {state_abbr}"):
+        year_dir = raw_base_dir / str(year)
+        all_year_data = []
+        session_file_pattern = f"{data_type}_*.json"  # Glob pattern
+
+        if year_dir.is_dir():
+            logger.debug(f"Scanning {year_dir} for session files like '{
+                         session_file_pattern}'")
+            files_found = 0
+            # Use glob to find files matching the pattern
+            for filepath in year_dir.glob(session_file_pattern):
+                # Further check if the part after '_' and before '.json' is numeric (session_id)
+                # Avoid consolidating the consolidated 'all_...' files
+                try:
+                    filename_parts = filepath.stem.split('_')
+                    # Check if the part after the data_type prefix looks like a number (session_id)
+                    # Avoid files like 'all_committees_2023_ID.json'
+                    if len(filename_parts) > 1 and filename_parts[0] == data_type and filename_parts[1].isdigit():
+                        pass  # Looks like a session file, e.g., committees_1234.json
+                    else:
+                        logger.debug(f"Skipping file, does not match session file pattern: {
+                                     filepath.name}")
+                        continue
+                except IndexError:
+                     logger.debug(f"Skipping file, cannot parse filename: {
+                                  filepath.name}")
+                     continue  # Skip files not matching the pattern
+
+                files_found += 1
+                logger.debug(f"Reading session file: {filepath}")
+                try:
+                    with filepath.open('r', encoding='utf-8') as f:
+                        session_data = json.load(f)
+                        if isinstance(session_data, list):
+                            all_year_data.extend(session_data)
+                        elif session_data is None or (isinstance(session_data, dict) and not session_data):
+                            logger.debug(f"Session file {
+                                         filepath} contains no data.")
+                        # Handle case where single item is dict? Unlikely for session lists.
+                        elif isinstance(session_data, dict) and session_data:
+                            logger.warning(f"Session file {
+                                           filepath} contained a dictionary, expected list. Adding as single item.")
+                            all_year_data.append(session_data)
+                        else:
+                            logger.warning(f"Expected list in {filepath}, got {
+                                           type(session_data)}. Skipping file.")
+                except json.JSONDecodeError:
+                    logger.error(f"Error decoding JSON from {
+                                 filepath}. Skipping file.")
+                except Exception as e:
+                    logger.error(f"Error reading {filepath}: {
+                                 e}. Skipping file.")
+
+            if files_found == 0:
+                logger.debug(
+                    f"No session files matching pattern found in {year_dir}.")
+
+        # Define output paths using Path
+        year_json_path = year_dir / f'all_{data_type}_{year}_{state_abbr}.json'
+        year_csv_path = processed_base_dir / \
+            f'{data_type}_{year}_{state_abbr}.csv'
+
+        if all_year_data:
+            # Optional: Deduplicate records based on a unique ID if needed (e.g., committee_id, bill_id)
+            # Example:
+            unique_data = all_year_data
+            primary_key = None
+            if data_type == 'committees': primary_key = 'committee_id'
+            elif data_type == 'bills': primary_key = 'bill_id'
+            # Add other keys if needed for sponsors/votes (composite keys might be necessary)
+
+            if primary_key:
+                seen_ids = set()
+                unique_data = []
+                duplicates = 0
+                for item in all_year_data:
+                    item_id = item.get(primary_key)
+                    if item_id is not None:  # Check if ID exists
+                       if item_id not in seen_ids:
+                           unique_data.append(item)
+                           seen_ids.add(item_id)
+                       else:
+                           duplicates += 1
+                    else:
+                         logger.warning(f"Record missing primary key '{primary_key}' in {
+                                        data_type} data for year {year}. Keeping it.")
+                         # Keep records without primary key? Or discard?
+                         unique_data.append(item)
+
+                if duplicates > 0:
+                     logger.info(f"Removed {duplicates} duplicate {
+                                 data_type} records based on '{primary_key}' for {year}.")
+                all_year_data = unique_data
+
+            logger.info(f"Consolidated {len(all_year_data)} unique {
+                        data_type} records for {year}.")
+            save_json(all_year_data, year_json_path)
+            convert_to_csv(all_year_data, year_csv_path, columns)
+        else:
+            logger.warning(f"No {data_type} data found or consolidated for {
+                           year}. Creating empty CSV.")
+            convert_to_csv([], year_csv_path, columns)
+
+
+# Mapping LegiScan Status Codes (Based on API Manual Page 42)
+STATUS_CODES = {
+    0: 'N/A',  # Not explicitly listed, but good default
+    1: 'Introduced',
+    2: 'Engrossed',
+    3: 'Enrolled',
+    4: 'Passed',
+    5: 'Vetoed',
+    6: 'Failed',  # Note: Manual says "Limited support based on state"
+    7: 'Override',  # Note: Manual says "Progress array only"
+    8: 'Chaptered',  # Note: Manual says "Progress array only"
+    9: 'Refer',  # Note: Manual says "Progress array only"
+    10: 'Report Pass',  # Note: Manual says "Progress array only"
+    11: 'Report DNP',  # (Do Not Pass) Note: Manual says "Progress array only"
+    12: 'Draft',  # Note: Manual says "Progress array only"
+    # Adding others based on common usage, though not in that specific table
+    13: 'Committee Process',  # Common intermediate step
+    14: 'Calendars',  # Common intermediate step
+    15: 'Failed Vote',  # Example, may need specific mapping
+    16: 'Veto Override Pass',  # Example
+    17: 'Veto Override Fail'  # Example
+}
+# Reverse mapping for convenience if needed
+STATUS_DESC_TO_CODE = {v: k for k, v in STATUS_CODES.items()}
+
+# Mapping Vote Text (Based on API Manual Page 43 and common usage)
+VOTE_TEXT_MAP = {
+    'yea': 1, 'aye': 1, 'yes': 1, 'pass': 1, 'y': 1,
+    'nay': 0, 'no': 0, 'fail': 0, 'n': 0,
+    # NV = Not Voting, AV = Abstain Vote?
+    'not voting': -1, 'abstain': -1, 'present': -1, 'nv': -1, 'av': -1,
+    'absent': -2, 'excused': -2, 'abs': -2, 'exc': -2,
+    # Add any other observed variations here
+}
+
+
+def map_vote_value(vote_text):
+    """Map vote text to numeric values (1: Yea, 0: Nay, -1: Abstain/Present/NV, -2: Absent/Excused, -9: Other/Unknown)."""
+    if vote_text is None: return -9
+    vt = str(vote_text).strip().lower()
+    return VOTE_TEXT_MAP.get(vt, -9)  # Default to -9 if not found
+
+
+# Mapping Sponsor Type ID (Based on API Manual Page 42)
+SPONSOR_TYPES = {
+    0: 'Sponsor (Generic / Unspecified)',  # Added based on manual text
+    1: 'Primary Sponsor',
+    2: 'Co-Sponsor',
+    3: 'Joint Sponsor'  # Added based on manual
+}
+
+
+def collect_bills_votes_sponsors(session):
+    """
+    Fetch and save bills, votes, and sponsors for a single session.
+    Uses getMasterList initially, then getBill for details, and getRollCall for vote details.
+    API Manual References: getMasterList (Page 9), getBill (Page 11-15, 34-36), getRollCall (Page 19, 37)
+    Optimization Note: Ideally, use getMasterListRaw and change_hash comparison (Page 6, 10)
+                     to only fetch getBill for *changed* bills after an initial full run.
+                     This implementation fetches all bills in the master list via getBill for simplicity
+                     in a single script execution context.
+    """
+    session_id = session.get('session_id')
+    session_name = session.get('session_name', f'ID: {session_id}')
+    year = session.get('year_start')
+
+    if not session_id or not year:
+        logger.warning(f"Session missing ID or valid start year: {
+                       session_name}. Skipping bill/vote/sponsor collection.")
+        return
+
+    # Use pathlib for directories
+    bills_year_dir = RAW_BILLS_DIR / str(year)
+    votes_year_dir = RAW_VOTES_DIR / str(year)
+    sponsors_year_dir = RAW_SPONSORS_DIR / str(year)
+    bills_year_dir.mkdir(parents=True, exist_ok=True)
+    votes_year_dir.mkdir(parents=True, exist_ok=True)
+    sponsors_year_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Collecting bills, votes, sponsors for {
+                year} session: {session_name} (ID: {session_id})...")
+    logger.info("Fetching master list first...")
+
+    # 1. Get Master List of Bills for the session (using getMasterList, not Raw yet)
+    params = {'id': session_id}
+    try:
+        # API Operation name: getMasterList
+        master_list_data = fetch_api_data('getMasterList', params)
+    except APIResourceNotFoundError:
+         logger.warning(f"Master bill list not found for session {
+                        session_name} (ID: {session_id}). Skipping.")
+         # Save empty files to mark session as processed
+         save_json([], bills_year_dir / f'bills_{session_id}.json')
+         save_json([], sponsors_year_dir / f'sponsors_{session_id}.json')
+         save_json([], votes_year_dir / f'votes_{session_id}.json')
+         return
+    except Exception as e:
+        logger.error(f"Unhandled exception fetching master list for session {
+                     session_name} (ID: {session_id}): {e}")
+        return
+
+    # Validate master list response (status, masterlist object)
+    if not (master_list_data and master_list_data.get('status') == 'OK' and 'masterlist' in master_list_data):
+        logger.error(f"Failed to retrieve valid master bill list for session {
+                     session_id}. Status: {master_list_data.get('status') if master_list_data else 'N/A'}")
+        return
+
+    # Is an object/dict where keys are indices '0', '1', ...
+    masterlist = master_list_data.get('masterlist', {})
+    if not isinstance(masterlist, dict) or not masterlist:
+        logger.warning(f"Masterlist for session {session_id} is empty or not a dictionary ({
+                       type(masterlist)}). No bills to process.")
+        save_json([], bills_year_dir / f'bills_{session_id}.json')
+        save_json([], sponsors_year_dir / f'sponsors_{session_id}.json')
+        save_json([], votes_year_dir / f'votes_{session_id}.json')
+        return
+
+    # Extract bill_id from each entry in the masterlist object
+    bill_ids_to_fetch = []
+    for key, bill_stub in masterlist.items():
+         # Check if key is numeric string and value is a dict with bill_id
+         if key.isdigit() and isinstance(bill_stub, dict) and 'bill_id' in bill_stub:
+              bill_ids_to_fetch.append(bill_stub['bill_id'])
+         # else: logger.debug(f"Skipping non-standard entry in masterlist: key='{key}'") # Avoid logging entire 'session' block if present
+
+    if not bill_ids_to_fetch:
+        logger.warning(f"Masterlist for session {
+                       session_id} contained no valid bill entries. No bills processed.")
+        save_json([], bills_year_dir / f'bills_{session_id}.json')
+        save_json([], sponsors_year_dir / f'sponsors_{session_id}.json')
+        save_json([], votes_year_dir / f'votes_{session_id}.json')
+        return
+
+    logger.info(f"Found {len(bill_ids_to_fetch)} bills in masterlist for session {
+                session_id}. Fetching full details...")
+
+    # 2. Fetch Details for Each Bill (including sponsors and votes list)
+    session_bills = []
+    session_votes = []
+    session_sponsors = []
+    # Could add session_texts, session_amendments, session_supplements if desired
+    bill_fetch_errors = 0
+    vote_fetch_errors = 0
+
+    for bill_id in tqdm(bill_ids_to_fetch, desc=f"Processing bills for session {session_id} ({year})", unit="bill"):
+        bill_params = {'id': bill_id}
+        try:
+            # API Operation name: getBill
+            bill_data = fetch_api_data('getBill', bill_params)
+        except APIResourceNotFoundError:
+            logger.warning(f"Bill ID {bill_id} not found. Skipping.")
+            bill_fetch_errors += 1
+            continue
+        except Exception as e:
+            logger.error(f"Unhandled exception fetching bill {bill_id}: {e}")
+            bill_fetch_errors += 1
+            continue
+
+        # Validate bill response (status, bill object)
+        if not (bill_data and bill_data.get('status') == 'OK' and 'bill' in bill_data):
+            logger.warning(f"Failed to retrieve valid full data for bill {
+                           bill_id}. Status: {bill_data.get('status') if bill_data else 'N/A'}")
+            bill_fetch_errors += 1
+            continue
+
+        bill = bill_data['bill']
+        if not isinstance(bill, dict):
+             logger.warning(f"Invalid bill data format for bill {
+                            bill_id} (not a dict): {type(bill)}")
+             continue
+
+        # Save raw bill JSON (using Path)
+        save_json(bill, bills_year_dir / f"bill_{bill_id}.json")
+
+        # --- Process Bill Information (Refined based on Page 34-36) ---
+        # Extract basic info
+        bill_record = {
+            'bill_id': bill.get('bill_id'),
+            # Important for delta updates
+            'change_hash': bill.get('change_hash'),
+            # Use session_id from bill data itself
+            'session_id': bill.get('session_id'),
+            'year': year,  # Use year derived from session
+            # Manual lists 'state' not 'state_abbr'
+            'state': bill.get('state', '').upper(),
+            'state_id': bill.get('state_id'),
+            'url': bill.get('url'),  # Legiscan URL
+            'state_link': bill.get('state_link'),  # State Legislature URL
+            'number': bill.get('bill_number', ''),
+            'type': bill.get('bill_type', ''),  # e.g., 'B', 'R'
+            'type_id': bill.get('bill_type_id'),
+            'body': bill.get('body', ''),  # Originating body ('H', 'S')
+            'body_id': bill.get('body_id'),
+            'current_body': bill.get('current_body', ''),  # Current body
+            'current_body_id': bill.get('current_body_id'),
+            'title': bill.get('title', ''),
+            'description': bill.get('description', ''),
+            'status': bill.get('status', 0),  # Progress ID
+            'status_desc': STATUS_CODES.get(int(bill.get('status', 0)), 'Unknown'),
+            'status_date': bill.get('status_date', ''),
+            # 'completed': bill.get('completed'), # DEPRECATED DO NOT USE
+            # 0 if none
+            'pending_committee_id': bill.get('pending_committee_id', 0),
+        }
+
+        # Extract subjects (list of dicts)
+        subjects = bill.get('subjects', [])
+        if isinstance(subjects, list):
+             bill_record['subjects'] = ';'.join(
+                 # Convert to string defensively
+                 str(subj.get('subject_name', ''))
+                 for subj in subjects if isinstance(subj, dict) and 'subject_name' in subj
+             )
+             bill_record['subject_ids'] = ';'.join(
+                 str(subj.get('subject_id', ''))
+                 for subj in subjects if isinstance(subj, dict) and 'subject_id' in subj
+            )
+        else:
+            bill_record['subjects'] = ''
+            bill_record['subject_ids'] = ''
+
+        # Extract SASTs (Same As/Similar To relations - list of dicts)
+        sasts = bill.get('sasts', [])
+        sast_records = []
+        if isinstance(sasts, list):
+            for sast in sasts:
+                if isinstance(sast, dict):
+                    sast_records.append({
+                        # See Page 42 for types
+                        'sast_type_id': sast.get('type_id'),
+                        'sast_type': sast.get('type'),
+                        'sast_bill_number': sast.get('sast_bill_number'),
+                        'sast_bill_id': sast.get('sast_bill_id')
+                    })
+            # Store as JSON string or semicolon-separated string in the main bill record
+            # Using JSON string is generally safer if structure is complex or varies
+            bill_record['sast_relations'] = json.dumps(sast_records)
+        else:
+            bill_record['sast_relations'] = json.dumps([])
+
+        # Extract Text stubs (list of dicts) - Store IDs/info, not full text yet
+        texts = bill.get('texts', [])
+        text_stubs = []
+        if isinstance(texts, list):
+            for text in texts:
+                if isinstance(text, dict):
+                    text_stubs.append({
+                        'doc_id': text.get('doc_id'),
+                        'date': text.get('date'),
+                        'type': text.get('type'),  # e.g., Introduced, Enrolled
+                        'type_id': text.get('type_id'),  # See Page 43
+                        'mime': text.get('mime'),
+                        'mime_id': text.get('mime_id')
+                        # text_size, text_hash, state_link, url also available here
+                    })
+            bill_record['text_stubs'] = json.dumps(text_stubs)
+        else:
+            bill_record['text_stubs'] = json.dumps([])
+
+        # Extract Amendment stubs (list of dicts) - Store IDs/info
+        amendments = bill.get('amendments', [])
+        amendment_stubs = []
+        if isinstance(amendments, list):
+            for amd in amendments:
+                if isinstance(amd, dict):
+                    amendment_stubs.append({
+                        'amendment_id': amd.get('amendment_id'),
+                        'adopted': amd.get('adopted', 0),
+                        'chamber': amd.get('chamber'),
+                        'chamber_id': amd.get('chamber_id'),
+                        'date': amd.get('date'),
+                        'title': amd.get('title')
+                         # description, mime, mime_id, url, state_link also available
+                    })
+            bill_record['amendment_stubs'] = json.dumps(amendment_stubs)
+        else:
+             bill_record['amendment_stubs'] = json.dumps([])
+
+        # Extract Supplement stubs (list of dicts) - Store IDs/info
+        supplements = bill.get('supplements', [])
+        supplement_stubs = []
+        if isinstance(supplements, list):
+            for supp in supplements:
+                if isinstance(supp, dict):
+                     supplement_stubs.append({
+                         'supplement_id': supp.get('supplement_id'),
+                         'date': supp.get('date'),
+                         # e.g., Fiscal Note/Analysis
+                         'type': supp.get('type'),
+                         'type_id': supp.get('type_id'),  # See Page 43
+                         'title': supp.get('title')
+                         # description, mime, mime_id, url, state_link also available
+                     })
+            bill_record['supplement_stubs'] = json.dumps(supplement_stubs)
+        else:
+             bill_record['supplement_stubs'] = json.dumps([])
+
+        session_bills.append(bill_record)
+
+        # --- Process Sponsors (Refined based on Page 35) ---
+        sponsors_list = bill.get('sponsors', [])
+        if isinstance(sponsors_list, list):
+            for sponsor in sponsors_list:
+                if isinstance(sponsor, dict):
+                     # Extract sponsor details based on manual
+                     # 1=Primary, 2=Cosponsor, 3=Joint
+                     sponsor_type_id = sponsor.get('sponsor_type_id')
+                     session_sponsors.append({
+                         'bill_id': bill.get('bill_id'),
+                         # Note: people_id is correct here
+                         'legislator_id': sponsor.get('people_id'),
+                         'sponsor_type_id': sponsor_type_id,
+                         'sponsor_type': SPONSOR_TYPES.get(sponsor_type_id, 'Unknown'),
+                         'sponsor_order': sponsor.get('sponsor_order', 0),
+                         # 0=Person, 1=Committee
+                         'committee_sponsor': sponsor.get('committee_sponsor', 0),
+                         # If committee sponsor
+                         'committee_id': sponsor.get('committee_id', 0),
+                         # Use bill's session_id
+                         'session_id': bill.get('session_id'),
+                         'year': year
+                     })
+                else:
+                     logger.warning(f"Invalid sponsor entry in bill {
+                                    bill_id}: {sponsor}")
+        else:
+            logger.warning(f"Unexpected format for sponsors in bill {
+                           bill_id}: {type(sponsors_list)}")
+
+        # --- Process Votes (fetch Roll Call details) ---
+        # This is a list of vote *stubs* in the bill object
+        votes_list = bill.get('votes', [])
+        if isinstance(votes_list, list):
+            for vote_stub in votes_list:
+                 if not isinstance(vote_stub, dict):
+                      logger.warning(f"Invalid vote stub entry in bill {
+                                     bill_id}: {vote_stub}")
+                      continue
+
+                 # Correct identifier from stub
+                 vote_id = vote_stub.get('roll_call_id')
+                 if not vote_id:
+                      logger.warning(f"Vote stub in bill {
+                                     bill_id} missing roll_call_id: {vote_stub}")
+                      continue
+
+                 # Fetch detailed roll call data
+                 roll_params = {'id': vote_id}
+                 try:
+                     # API Operation name: getRollCall
+                     # Adjust wait time slightly? Usually fine with default.
+                     # wait_time=DEFAULT_WAIT * 1.1
+                     roll_data = fetch_api_data('getRollCall', roll_params)
+                 except APIResourceNotFoundError:
+                     logger.warning(f"Roll Call ID {vote_id} (from bill {
+                                    bill_id}) not found. Skipping.")
+                     vote_fetch_errors += 1
+                     continue
+                 except Exception as e:
+                     logger.error(f"Unhandled exception fetching roll call {
+                                  vote_id} (from bill {bill_id}): {e}")
+                     vote_fetch_errors += 1
+                     continue
+
+                 # Validate roll call response (status, roll_call object)
+                 if not (roll_data and roll_data.get('status') == 'OK' and 'roll_call' in roll_data):
+                     logger.warning(f"Failed to retrieve valid roll call data for vote {vote_id} (from bill {
+                                    bill_id}). Status: {roll_data.get('status') if roll_data else 'N/A'}")
+                     vote_fetch_errors += 1
+                     continue
+
+                 roll_call = roll_data['roll_call']
+                 if not isinstance(roll_call, dict):
+                      logger.warning(f"Invalid roll_call data format for vote {
+                                     vote_id} (not a dict): {type(roll_call)}")
+                      continue
+
+                 # Save raw vote JSON (using Path)
+                 save_json(roll_call, votes_year_dir / f"vote_{vote_id}.json")
+
+                 # Extract individual votes from the roll call (based on Page 37)
+                 individual_votes = roll_call.get('votes', [])  # List of dicts
+                 if isinstance(individual_votes, list):
+                      for vote in individual_votes:
+                          if isinstance(vote, dict):
+                               legislator_id = vote.get(
+                                   'people_id')  # Correct identifier
+                               if legislator_id:  # Only record votes linked to a legislator
+                                   vote_record = {
+                                       'vote_id': vote_id,  # The roll_call_id
+                                       # Use bill_id from roll_call data
+                                       'bill_id': roll_call.get('bill_id'),
+                                       'legislator_id': legislator_id,
+                                       # 1=Yea, 2=Nay, 3=NV, 4=Absent (Page 37)
+                                       'vote_id_type': vote.get('vote_id'),
+                                       # Raw text (Yea, Nay, etc.)
+                                       'vote_text': vote.get('vote_text', ''),
+                                       # Mapped numeric
+                                       'vote_value': map_vote_value(vote.get('vote_text')),
+                                       # Date of the roll call vote
+                                       'date': roll_call.get('date', ''),
+                                       # Description of the vote action
+                                       'description': roll_call.get('desc', ''),
+                                       # Counts from roll call summary
+                                       'yea': roll_call.get('yea', 0),
+                                       'nay': roll_call.get('nay', 0),
+                                       'nv': roll_call.get('nv', 0),
+                                       'absent': roll_call.get('absent', 0),
+                                       'total': roll_call.get('total', 0),
+                                       # 0=No, 1=Yes
+                                       'passed': int(roll_call.get('passed', 0)),
+                                       # 'H', 'S'
+                                       'chamber': roll_call.get('chamber', ''),
+                                       'chamber_id': roll_call.get('chamber_id'),
+                                       # Link back to bill's session
+                                       'session_id': bill.get('session_id'),
+                                       'year': year,
+                                   }
+                                   session_votes.append(vote_record)
+                               else:
+                                   logger.debug(f"Vote record in roll call {
+                                                vote_id} missing legislator ID: {vote}")
+                          else:
+                               logger.warning(f"Invalid individual vote entry in roll call {
+                                              vote_id}: {vote}")
+                 else:
+                      logger.warning(f"Unexpected format for votes within roll call {
+                                     vote_id}: {type(individual_votes)}")
+        else:
+            logger.warning(f"Unexpected format for votes list stub in bill {
+                           bill_id}: {type(votes_list)}")
+
+    # --- Save consolidated data for the session ---
+    logger.info(f"Finished processing session {session_id}. Bills: {len(session_bills)}, Sponsors: {len(session_sponsors)}, Votes: {
+                len(session_votes)}. Bill fetch errors: {bill_fetch_errors}, Vote fetch errors: {vote_fetch_errors}")
+
+    # Define session-specific file paths (using Path)
+    session_bills_json_path = bills_year_dir / f'bills_{session_id}.json'
+    session_sponsors_json_path = sponsors_year_dir / \
+        f'sponsors_{session_id}.json'
+    session_votes_json_path = votes_year_dir / f'votes_{session_id}.json'
+
+    # Save session data
+    save_json(session_bills, session_bills_json_path)
+    save_json(session_sponsors, session_sponsors_json_path)
+    save_json(session_votes, session_votes_json_path)
+
+    # Yearly consolidation happens later via consolidate_yearly_data
+
+# --- Web Scraping Functions (Idaho Specific - Largely unchanged by API manual) ---
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=3, max=30),
+    retry=retry_if_exception_type(
+        (requests.exceptions.Timeout, requests.exceptions.ConnectionError)),
+    before_sleep=lambda retry_state: logger.warning(f"Retry attempt {retry_state.attempt_number} for scraping {
+                                                    retry_state.args[0]} after error: {retry_state.outcome.exception()}")
+)
+def fetch_page(url):
+    """Fetch HTML content from a URL with error handling and retries for scraping."""
+    try:
+        headers = {  # Standard browser headers
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive',
+        }
+        response = requests.get(url, headers=headers,
+                                timeout=40, allow_redirects=True, verify=True)
+        response.raise_for_status()  # Check for HTTP errors
+
+        content_type = response.headers.get('Content-Type', '').lower()
+        if 'html' not in content_type:
+            logger.warning(f"Non-HTML content type ('{content_type}') received from {
+                           url}. Body preview: {response.text[:200]}...")
+            # Consider returning None if absolutely need HTML
+            # return None
+            # Or return the text cautiously
+            return response.text
+
+        if len(response.content) < 500:  # Heuristic for small/error pages
+             logger.warning(f"Very small response received from {
+                            url} ({len(response.content)} bytes). May indicate error.")
+
+        return response.text  # Return HTML content
+
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Timeout fetching {url} after {
+                     getattr(e.request, 'timeout', 'N/A')} seconds.")
+        raise  # Re-raise Timeout to trigger retry
+    except requests.exceptions.ConnectionError as e:
+         logger.error(f"Connection error fetching {url}: {str(e)}")
+         raise  # Re-raise ConnectionError to trigger retry
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else 'N/A'
+        logger.error(f"HTTP error fetching {url}: {
+                     str(e)}. Status Code: {status_code}")
+        return None  # Don't retry on persistent HTTP errors like 404, 403
+    except requests.exceptions.RequestException as e:
+        logger.error(f"General request exception fetching {url}: {str(e)}")
+        return None  # Don't retry generic RequestExceptions
+
+
+def parse_idaho_committee_page(html, chamber, current_year):
+    """Parse committee data from Idaho Legislature HTML (fragile, needs maintenance)."""
+    # This function's logic is specific to the website structure, not the Legiscan API.
+    # No changes needed based on the API manual. Keep existing implementation.
+    if not html:
+        logger.warning(f"No HTML content provided for parsing {
+                       chamber} committees.")
+        return []
+
+    soup = BeautifulSoup(html, 'html.parser')
+    committees = []
+    logger.info(f"Parsing {chamber} committee page for year {current_year}...")
+
+    # --- Idaho Specific Selectors (Keep existing fragile selectors) ---
+    # Try more general approach first - look for headings followed by lists/paragraphs
+    potential_headings = soup.find_all(['h3', 'h4'])
+    ignore_headings = ['search', 'legislative services office', 'contact information',
+        'about committees', 'committee schedules', 'meeting notices']
+    # Track names to avoid duplicates from different selectors
+    parsed_committee_names = set()
+
+    for heading_tag in potential_headings:
+        committee_name = heading_tag.get_text(strip=True)
+        if (not committee_name or len(committee_name) < 5 or
+                any(ignore in committee_name.lower() for ignore in ignore_headings) or
+                committee_name in parsed_committee_names):
+             logger.debug(
+                 f"Skipping potential non-committee or duplicate section: '{committee_name}'")
+             continue
+
+        logger.info(f"Processing potential committee: '{committee_name}'")
+        members = []
+        found_members = False
+
+        # Look for members in subsequent UL/OL or P tags until the next heading or end of container
+        next_element = heading_tag.find_next_sibling()
+        potential_member_tags = []
+        while next_element and next_element.name not in ['h1', 'h2', 'h3', 'h4']:
+            if next_element.name in ['ul', 'ol']:
+                potential_member_tags.extend(next_element.find_all('li'))
+            elif next_element.name == 'p':
+                potential_member_tags.append(next_element)
+            # Add other relevant tags if needed, e.g., 'div' containing member lists
+            # elif next_element.name == 'div':
+            #     potential_member_tags.extend(next_element.find_all('p')) # Example
+
+            next_element = next_element.find_next_sibling()
+
+        # If siblings didn't work well, try looking inside parent container (less reliable)
+        if not potential_member_tags:
+            logger.debug(f"No members found as siblings for '{
+                         committee_name}'. Checking parent container.")
+            container = heading_tag.parent
+            list_tags = container.find(['ul', 'ol'])
+            p_tags = container.find_all('p')
+
+            if list_tags:
+                potential_member_tags.extend(list_tags.find_all('li'))
+            if p_tags:
+                filtered_p_tags = [p for p in p_tags if len(p.get_text(
+                    strip=True)) > 5 and p.get_text(strip=True) != committee_name]
+                potential_member_tags.extend(filtered_p_tags)
+
+        if not potential_member_tags:
+             logger.warning(f"Could not find any paragraph or list tags (<p>, <li>) for members under committee '{
+                            committee_name}'.")
+             continue  # Skip this committee if no members found
+
+        # Extract names (Keep existing cleaning logic)
+        for tag in potential_member_tags:
+            text = tag.get_text(separator=' ', strip=True)
+            if not text or len(text) < 3: continue
+
+            # Handle cases where multiple members might be in one tag (e.g., comma-separated in a <p>)
+            # Simple split by common delimiters, refinement might be needed
+            parts_to_process = []
+            if ',' in text and len(text) > 20:  # Heuristic for list in paragraph
+                parts_to_process = [p.strip()
+                                            for p in text.split(',') if len(p.strip()) > 3]
+            elif ';' in text and len(text) > 20:
+                 parts_to_process = [p.strip()
+                                             for p in text.split(';') if len(p.strip()) > 3]
+            else:
+                 # Assume one member per tag/item otherwise
+                 parts_to_process = [text]
+
+            for part in parts_to_process:
+                 role = 'Member'
+                 name_part = part.strip()
+
+                 # Check for roles (Keep existing checks, make case-insensitive)
+                 if name_part.lower().startswith(('chair:', 'chair,', 'chairman:')):
+                      role = 'Chair'; name_part = name_part.split(
+                          ':', 1)[-1].strip()
+                 elif name_part.lower().startswith(('vice chair:', 'vice-chair:')):
+                      role = 'Vice Chair'; name_part = name_part.split(
+                          ':', 1)[-1].strip()
+                 elif name_part.lower().startswith('secretary:'):
+                      logger.debug(f"Skipping likely secretary: {name_part}"); continue
+
+                 # Clean name (Keep existing cleaning, enhance slightly)
+                 name_part = name_part.replace('Rep.', '').replace(
+                     'Senator', '').replace('Sen.', '').strip()
+                 # Remove bracketed info like (R-District 5) or similar
+                 name_part = name_part.split('(')[0].strip()
+                 # Handle "LastName, FirstName" format often seen
+                 name_parts_comma = name_part.split(',')
+                 if len(name_parts_comma) == 2 and len(name_parts_comma[0].strip()) > 1 and len(name_parts_comma[1].strip()) > 1:
+                     # Potential "Last, First" format
+                     possible_name = f"{name_parts_comma[1].strip()} {
+                                                                  name_parts_comma[0].strip()}"
+                     # Check if it looks like a name (avoiding "City, State" etc.)
+                     if not any(char.isdigit() for char in possible_name) and len(possible_name) > 4:
+                         name_part = possible_name
+                         logger.debug(
+                             f"Reformatted name from 'Last, First': {name_part}")
+
+                 # Final cleanup
+                 name_part = name_part.strip(',- ')
+                 # Avoid leftover HTML
+                 if name_part and len(name_part) > 2 and not name_part.isdigit() and '<' not in name_part:
+                      if not any(m['name'] == name_part for m in members):
+                           members.append({'name': name_part, 'role': role})
+                           logger.debug(f"  Found member: Name='{
+                                        name_part}', Role='{role}'")
+                           found_members = True
+                      else: logger.debug(f"  Skipping duplicate member: '{name_part}'")
+
+        if found_members:
+             # Use a slightly more robust slug, handle non-alphanumeric
+             c_name_slug = "".join(c if c.isalnum() else '_' for c in committee_name).lower(
+             ).strip('_').replace('__', '_')
+             committee_id_scraped = f"{chamber.lower()}_{c_name_slug}_{
+                                                     current_year}"
+             committees.append({
+                 'committee_name_scraped': committee_name,
+                 'committee_id_scraped': committee_id_scraped,
+                 'chamber': chamber,
+                 'members': members,
+                 'year': current_year,
+                 'source_url': "Idaho Legislature Website"  # Keep source info
+             })
+             parsed_committee_names.add(committee_name)  # Mark as parsed
+             logger.info(f"Successfully parsed committee: '{
+                         committee_name}' with {len(members)} potential members.")
+        # Only warn if we didn't find members for a name we tried
+        elif committee_name not in parsed_committee_names:
+             logger.warning(f"Found committee title '{
+                            committee_name}' but failed to parse any members.")
+
+    logger.info(f"Finished parsing {chamber} page. Found {
+                len(committees)} committees.")
+    return committees
+
+
+def scrape_committee_memberships(state_abbr):
+    """Scrape committee memberships from State Legislature website (State-Specific)."""
+    # Logic remains state-specific. No changes needed based on API manual.
+    state_configs = {
+        'ID': {
+            'base_name': 'Idaho Legislature',
+            'urls': {
+                'House': 'https://legislature.idaho.gov/house/committees/',
+                'Senate': 'https://legislature.idaho.gov/senate/committees/'
+            },
+            'parser': parse_idaho_committee_page
+        },
+        # Add configurations for other states here if needed
+    }
+
+    if state_abbr not in state_configs:
+        logger.error(f"Scraping configuration not defined for state: {
+                     state_abbr}. Skipping scraping.")
+        return None
+
+    config = state_configs[state_abbr]
+    urls = config['urls']
+    parser_func = config['parser']
+    source_name = config['base_name']
+
+    all_scraped_committees = []
+    current_year = datetime.now().year
+    # Use pathlib
+    scraped_memberships_dir = RAW_COMMITTEE_MEMBERSHIPS_DIR / str(current_year)
+    scraped_memberships_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"--- Starting Web Scraping for {state_abbr} ({
+                source_name}) Committee Memberships ({current_year}) ---")
+    logger.warning(f"Web scraping depends on the '{
+                   source_name}' website structure and is fragile.")
+
+    for chamber, url in urls.items():
+        logger.info(f"Scraping {chamber} committees from: {url}")
+        try:
+            html = fetch_page(url)
+            if not html:
+                logger.warning(
+                    f"Failed to fetch or received non-HTML content for {chamber} from {url}. Skipping.")
+                continue
+
+            committees = parser_func(html, chamber, current_year)
+            if not committees:
+                logger.warning(f"Parser did not return any committees for {
+                               chamber} from {url}.")
+                continue
+
+            all_scraped_committees.extend(committees)
+
+            # Save individual raw JSON (using Path)
+            for committee in committees:
+                 c_id = committee['committee_id_scraped']
+                 # Clean the ID slightly more for filename safety
+                 safe_c_id = "".join(
+                     c if c.isalnum() else '_' for c in c_id).strip('_')
+                 json_path = scraped_memberships_dir / \
+                     f"{safe_c_id}_raw_scraped.json"
+                 save_json(committee, json_path)
+
+        except Exception as e:
+             logger.error(
+                 f"Unhandled error during scraping/parsing for {chamber} at {url}: {e}", exc_info=True)
+             continue
+
+    # Store as string for compatibility if needed later
+    consolidated_raw_path_str = None
+    if all_scraped_committees:
+        logger.info(f"Total committees scraped across all chambers for {
+                    current_year}: {len(all_scraped_committees)}")
+        flat_memberships = []
+        for committee in all_scraped_committees:
+            for member in committee.get('members', []):
+                 flat_memberships.append({
+                     'committee_id_scraped': committee.get('committee_id_scraped'),
+                     'committee_name_scraped': committee.get('committee_name_scraped'),
+                     'chamber': committee.get('chamber'),
+                     'year': committee.get('year'),
+                     'legislator_name_scraped': member.get('name'),
+                     'role_scraped': member.get('role'),
+                     'legislator_id': None,  # To be filled
+                     'match_score': None,   # To be filled
+                     'matched_api_name': None  # To be filled
+                 })
+        logger.info(f"Generated {len(flat_memberships)
+                    } flat membership records.")
+
+        # Save consolidated flat list (using Path)
+        consolidated_raw_path = scraped_memberships_dir / \
+            f'scraped_memberships_raw_{state_abbr}_{current_year}.json'
+        save_json(flat_memberships, consolidated_raw_path)
+        # Convert to string for return
+        consolidated_raw_path_str = str(consolidated_raw_path)
+
+        # Save raw CSV (using Path)
+        raw_csv_path = scraped_memberships_dir / \
+            f'raw_scraped_memberships_{state_abbr}_{current_year}.csv'
+        raw_csv_columns = [
+            'committee_id_scraped', 'committee_name_scraped', 'chamber', 'year',
+            'legislator_name_scraped', 'role_scraped'
+        ]
+        convert_to_csv(flat_memberships, raw_csv_path, raw_csv_columns)
+    else:
+        logger.warning(f"No committee data was successfully scraped for {
+                       state_abbr} ({current_year}).")
+
+    logger.info(
+        f"--- Finished Web Scraping for {state_abbr} Committees ({current_year}) ---")
+    return consolidated_raw_path_str  # Return string path
+
+
+def match_scraped_legislators(scraped_memberships_json_path, legislators_json_path, output_csv_path):
+    """
+    Match legislator names from scraped memberships JSON to legislator IDs from API JSON using fuzzy matching.
+    Relies on the 'name' field from the legislator data collected via getSessionPeople.
+    """
+    # Use Path objects for input/output paths
+    scraped_path = Path(scraped_memberships_json_path)
+    legislators_path = Path(legislators_json_path)
+    output_path = Path(output_csv_path)
+
+    if not scraped_path.exists():
+        logger.error(f"Scraped memberships JSON file not found: {
+                     scraped_path}. Cannot perform matching.")
+        return
+    if not legislators_path.exists():
+        logger.error(f"Legislators JSON file not found: {
+                     legislators_path}. Cannot perform matching.")
+        return
+
+    logger.info(f"Attempting to match scraped legislator names from {
+                scraped_path} to {legislators_path}...")
+    try:
+        # Load legislators from the consolidated JSON file
+        with legislators_path.open('r', encoding='utf-8') as f:
+            legislators_list = json.load(f)
+        if not legislators_list or not isinstance(legislators_list, list):
+            logger.error(f"Legislators file {
+                         legislators_path} is empty or invalid. Cannot perform matching.")
+            return
+
+        # Load scraped memberships
+        with scraped_path.open('r', encoding='utf-8') as f:
+            scraped_memberships = json.load(f)  # Should be the flat list
+        if not scraped_memberships or not isinstance(scraped_memberships, list):
+            logger.warning(f"Scraped memberships file {
+                           scraped_path} is empty or invalid. Nothing to match.")
+            csv_columns = [
+                'committee_id_scraped', 'committee_name_scraped', 'chamber', 'year',
+                'legislator_name_scraped', 'role_scraped', 'legislator_id',
+                'matched_api_name', 'match_score'
+            ]
+            convert_to_csv([], output_path, csv_columns)
+            return
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON for matching: {
+                     e}. Check file integrity ({legislators_path} or {scraped_path}).")
+        return
+    except Exception as e:
+        logger.error(f"Unexpected error loading data for matching: {str(e)}")
+        return
+
+    # Prepare legislator data for matching: Use 'name' field (Full Name)
+    valid_legislators = [l for l in legislators_list if isinstance(
+        l, dict) and l.get('name') and l.get('legislator_id')]
+    if len(valid_legislators) != len(legislators_list):
+        logger.warning(f"Filtered out {len(legislators_list) - len(
+            valid_legislators)} invalid legislator entries from {legislators_path}")
+
+    if not valid_legislators:
+         logger.error(f"No valid legislator entries with 'name' and 'legislator_id' found in {
+                      legislators_path}. Matching aborted.")
+         return
+
+    # Create choices list (names) and mapping (name to ID) for fuzzywuzzy
+    legislator_names_choices = [l['name'] for l in valid_legislators]
+    legislator_name_to_id = {l['name']: l['legislator_id']
+        for l in valid_legislators}
+
+    matched_count = 0
+    unmatched_count = 0
+    updated_memberships = []
+
+    for membership in tqdm(scraped_memberships, desc="Matching scraped names", unit="record"):
+        if not isinstance(membership, dict):
+             logger.warning(
+                 f"Skipping invalid membership record (not a dict): {membership}")
+             unmatched_count += 1
+             continue
+
+        updated_record = membership.copy()
+        updated_record['legislator_id'] = None  # Use None for missing ID
+        updated_record['match_score'] = 0
+        updated_record['matched_api_name'] = None
+
+        scraped_name = membership.get('legislator_name_scraped')
+        if not scraped_name or not isinstance(scraped_name, str) or len(scraped_name) < 3:
+            logger.debug(
+                f"Membership record missing valid 'legislator_name_scraped': {membership}")
+            unmatched_count += 1
+            updated_memberships.append(updated_record)
+            continue
+
+        # Perform fuzzy matching using the 'name' field
+        # Use process.extract instead of extractOne to see multiple potential matches if needed for debugging
+        # best_matches = process.extract(scraped_name, legislator_names_choices, limit=3)
+        # logger.debug(f"Matches for '{scraped_name}': {best_matches}")
+        match_result = process.extractOne(
+            scraped_name, legislator_names_choices, score_cutoff=FUZZY_MATCH_THRESHOLD)
+
+        if match_result:
+            best_match_name, score = match_result
+            matched_id = legislator_name_to_id.get(best_match_name)
+            if matched_id:
+                updated_record['legislator_id'] = matched_id
+                updated_record['match_score'] = score
+                updated_record['matched_api_name'] = best_match_name
+                logger.debug(f"Matched '{
+                             scraped_name}' -> '{best_match_name}' (ID: {matched_id}, Score: {score})")
+                matched_count += 1
+            else:
+                logger.error(f"Internal error: Matched name '{
+                             best_match_name}' not found in name-to-ID map.")
+                unmatched_count += 1
+        else:
+            logger.warning(f"No match found for scraped name: '{
+                           scraped_name}' (Threshold: {FUZZY_MATCH_THRESHOLD})")
+            unmatched_count += 1
+
+        updated_memberships.append(updated_record)
+
+    logger.info(f"Legislator matching complete: {
+                matched_count} matched, {unmatched_count} unmatched.")
+
+    # Save the updated memberships list (with matching info) back to JSON (using Path)
+    # Determine output name, trying to replace _raw.json suffix
+    if scraped_path.name.endswith('_raw.json'):
+        matched_json_name = scraped_path.name.replace(
+            '_raw.json', '_matched.json')
+    else:
+        matched_json_name = f"{scraped_path.stem}_matched{scraped_path.suffix}"
+    matched_json_output_path = scraped_path.with_name(matched_json_name)
+    save_json(updated_memberships, matched_json_output_path)
+
+    # Define columns for the final matched CSV output
+    csv_columns = [
+        'committee_id_scraped', 'committee_name_scraped', 'chamber', 'year',
+        'legislator_name_scraped', 'role_scraped', 'legislator_id',
+        'matched_api_name', 'match_score'
+    ]
+    # Save the final matched data to the specified CSV path
+    convert_to_csv(updated_memberships, output_path, csv_columns)
+
+
+def consolidate_membership_data(years, state_abbr):
+    """Consolidates matched scraped committee membership CSVs from multiple years."""
+    logger.info(
+        f"Consolidating *matched* scraped committee membership data for {state_abbr}...")
+    all_memberships_dfs = []
+    processed_files_found = 0
+    # Use Path from DATA_DIRS
+    base_dir = DATA_DIRS.get('processed')
+    if not base_dir:
+        logger.error("Processed directory path not found in DATA_DIRS.")
+        return
+
+    # Define expected final columns
+    final_cols = [
+        'committee_id_scraped', 'committee_name_scraped', 'chamber', 'year',
+        'legislator_name_scraped', 'role_scraped', 'legislator_id',
+        'matched_api_name', 'match_score'
+    ]
+
+    # Ensure years is iterable if it's a range
+    years_list = list(years)
+    min_year = min(years_list) if years_list else 'N/A'
+    max_year = max(years_list) if years_list else 'N/A'
+
+    for year in years_list:
+        # Look for the *matched* CSV file (using Path)
+        scraped_csv_path = base_dir / \
+            f'committee_memberships_scraped_matched_{state_abbr}_{year}.csv'
+        if scraped_csv_path.exists():
+            try:
+                logger.info(f"Loading matched memberships from {scraped_csv_path}")
+                # Use Int64 for legislator_id to handle potential pd.NA correctly
+                # Specify encoding='utf-8' for resilience
+                df = pd.read_csv(scraped_csv_path, dtype={
+                                 'legislator_id': 'Int64'}, encoding='utf-8')
+
+                if not df.empty:
+                    # Ensure essential columns exist
+                    if not all(col in df.columns for col in ['committee_id_scraped', 'legislator_name_scraped']):
+                        logger.warning(
+                            f"File {scraped_csv_path} missing essential columns. Skipping.")
+                        continue
+
+                    # Add missing columns from final_cols list if needed, fill with pd.NA
+                    for col in final_cols:
+                        if col not in df.columns:
+                            df[col] = pd.NA
+
+                    all_memberships_dfs.append(df[final_cols]) # Select only final columns
+                    processed_files_found += 1
+                else:
+                    logger.info(f"Membership file is empty, skipping: {scraped_csv_path}") # Use info level
+
+            except pd.errors.EmptyDataError:
+                logger.warning(f"Membership file is empty (Pandas EmptyDataError), skipping: {scraped_csv_path}")
+            except Exception as e:
+                logger.error(f"Error loading matched membership CSV {scraped_csv_path}: {str(e)}")
+        # else: logger.debug(f"Matched membership file not found for {year}: {scraped_csv_path}") # Can be verbose
+
+    # *** CORRECTED INDENTATION: This block now runs AFTER the loop finishes ***
+    if all_memberships_dfs:
+        consolidated_df = pd.concat(all_memberships_dfs, ignore_index=True)
+        logger.info(f"Consolidated {len(consolidated_df)} matched committee membership records from {processed_files_found} yearly files.")
+
+        # Final check and reordering of columns
+        for col in final_cols:
+            if col not in consolidated_df.columns:
+                logger.warning(f"Column '{col}' missing in consolidated memberships, adding empty.")
+                consolidated_df[col] = pd.NA # Use pandas NA
+
+        # Select and reorder columns
+        consolidated_df = consolidated_df[final_cols]
+
+        # Define output paths
+        output_csv = base_dir / f'committee_memberships_scraped_consolidated_{state_abbr}.csv'
+        raw_membership_base_dir = DATA_DIRS.get('committee_memberships')
+        if raw_membership_base_dir:
+            # Save consolidated JSON to the *raw* memberships directory for potential future reloading
+            output_json = raw_membership_base_dir / f'all_memberships_scraped_consolidated_{state_abbr}.json'
+        else:
+            output_json = None
+            logger.warning("Raw committee memberships directory not found, cannot save consolidated JSON there.")
+
+        # Save consolidated data
+        consolidated_df.to_csv(output_csv, index=False, encoding='utf-8')
+        logger.info(f"Saved consolidated matched memberships CSV to {output_csv}")
+        if output_json:
+            # Convert DataFrame to list of dicts, replacing pd.NA with None for JSON compatibility
+            save_json(consolidated_df.where(pd.notna(consolidated_df), None).to_dict('records'), output_json)
+            logger.info(f"Saved consolidated matched memberships JSON to {output_json}")
+
+    else:
+        # This 'else' block correctly aligns with the 'if all_memberships_dfs:'
+        logger.warning(f"No *matched* scraped committee membership files found to consolidate for {state_abbr} in years {min_year}-{max_year}.")
+        # Optionally create an empty consolidated file
+        output_csv = base_dir / f'committee_memberships_scraped_consolidated_{state_abbr}.csv'
+        convert_to_csv([], output_csv, final_cols)
+
+
+# --- Stub Functions for New Data Sources (Unchanged) ---
+
+def collect_campaign_finance(state_abbr, years):
+    """(STUB) Collect campaign finance data."""
+    logger.warning(f"--- STUB FUNCTION CALLED: collect_campaign_finance({state_abbr}, {list(years)}) ---")
+    logger.warning("This function is NOT IMPLEMENTED.")
+    DATA_DIRS['campaign_finance'].mkdir(parents=True, exist_ok=True)
+
+def collect_district_demographics(state_abbr):
+    """(STUB) Collect demographic data for districts."""
+    logger.warning(f"--- STUB FUNCTION CALLED: collect_district_demographics({state_abbr}) ---")
+    logger.warning("This function is NOT IMPLEMENTED.")
+    DATA_DIRS['demographics'].mkdir(parents=True, exist_ok=True)
+
+def collect_election_history(state_abbr, years):
+    """(STUB) Collect historical election results."""
+    logger.warning(f"--- STUB FUNCTION CALLED: collect_election_history({state_abbr}, {list(years)}) ---")
+    logger.warning("This function is NOT IMPLEMENTED.")
+    DATA_DIRS['elections'].mkdir(parents=True, exist_ok=True)
+
+
+# --- Main Execution ---
+def main():
+    """Main execution function: parses arguments and orchestrates data collection."""
+    parser = argparse.ArgumentParser(
+        description="Collect legislative data from LegiScan API and State Legislature website (Idaho specific scraping).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        )
+    parser.add_argument('--state', type=str.upper, default='ID',
+                        help='State abbreviation (e.g., ID, CA, TX). Case-insensitive input, stored as uppercase.')
+    parser.add_argument('--start-year', type=int, default=DEFAULT_YEARS_START,
+                        help='Start year for data collection (inclusive).')
+    parser.add_argument('--end-year', type=int, default=DEFAULT_YEARS_END - 1,
+                        help='End year for data collection (inclusive).')
+    parser.add_argument('--skip-api', action='store_true',
+                        help='Skip all LegiScan API data collection.')
+    parser.add_argument('--skip-scraping', action='store_true',
+                        help='Skip web scraping for current year committee memberships (State-specific).')
+    parser.add_argument('--skip-matching', action='store_true',
+                        help='Skip fuzzy matching of scraped committee members to API legislators.')
+    parser.add_argument('--skip-consolidation', action='store_true',
+                        help='Skip consolidation of yearly API data and scraped memberships.')
+    parser.add_argument('--collect-finance', action='store_true', help='(STUB) Trigger collection of campaign finance.')
+    parser.add_argument('--collect-demographics', action='store_true', help='(STUB) Trigger collection of demographics.')
+    parser.add_argument('--collect-elections', action='store_true', help='(STUB) Trigger collection of elections.')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Override base data directory (default: ./data).')
+
+    args = parser.parse_args()
+
+    # --- Input Validation ---
+    if args.start_year > args.end_year:
+        logger.error("Start year cannot be after end year.")
+        sys.exit(1)
+    if args.end_year > CURRENT_YEAR + 1: # Allow fetching into next year for prefiled/current session
+         logger.warning(f"End year ({args.end_year}) is beyond the current year + 1. Data may not exist.")
+
+    years_to_process = list(range(args.start_year, args.end_year + 1)) # Use list for potential modifications
+    state_abbr = args.state
+
+    # --- Setup Directories (Handles --data-dir override using pathlib) ---
+    global BASE_DATA_DIR, RAW_DIR, PROCESSED_DIR, DATA_DIRS
+    global RAW_LEGISLATORS_DIR, RAW_BILLS_DIR, RAW_VOTES_DIR, RAW_COMMITTEES_DIR
+    global RAW_COMMITTEE_MEMBERSHIPS_DIR, RAW_SPONSORS_DIR, RAW_CAMPAIGN_FINANCE_DIR
+    global RAW_DEMOGRAPHICS_DIR, RAW_ELECTIONS_DIR, PROCESSED_DATA_DIR
+    # Add new raw dirs
+    global RAW_TEXTS_DIR, RAW_AMENDMENTS_DIR, RAW_SUPPLEMENTS_DIR
+
+    if args.data_dir:
+        BASE_DATA_DIR = Path(args.data_dir).resolve() # Use absolute path
+        logger.info(f"Overriding base data directory to: {BASE_DATA_DIR}")
+        RAW_DIR = BASE_DATA_DIR / 'raw'
+        PROCESSED_DIR = BASE_DATA_DIR / 'processed'
+
+        # Update all directory paths based on the new base
+        RAW_LEGISLATORS_DIR = RAW_DIR / 'legislators'
+        RAW_BILLS_DIR = RAW_DIR / 'bills'
+        RAW_VOTES_DIR = RAW_DIR / 'votes'
+        RAW_COMMITTEES_DIR = RAW_DIR / 'committees'
+        RAW_COMMITTEE_MEMBERSHIPS_DIR = RAW_DIR / 'committee_memberships'
+        RAW_SPONSORS_DIR = RAW_DIR / 'sponsors'
+        RAW_CAMPAIGN_FINANCE_DIR = RAW_DIR / 'campaign_finance'
+        RAW_DEMOGRAPHICS_DIR = RAW_DIR / 'demographics'
+        RAW_ELECTIONS_DIR = RAW_DIR / 'elections'
+        RAW_TEXTS_DIR = RAW_DIR / 'texts'
+        RAW_AMENDMENTS_DIR = RAW_DIR / 'amendments'
+        RAW_SUPPLEMENTS_DIR = RAW_DIR / 'supplements'
+        PROCESSED_DATA_DIR = PROCESSED_DIR
+
+        # Rebuild DATA_DIRS dictionary using updated Path objects
+        DATA_DIRS = {
+            'legislators': RAW_LEGISLATORS_DIR, 'bills': RAW_BILLS_DIR,
+            'votes': RAW_VOTES_DIR, 'committees': RAW_COMMITTEES_DIR,
+            'committee_memberships': RAW_COMMITTEE_MEMBERSHIPS_DIR,
+            'sponsors': RAW_SPONSORS_DIR, 'campaign_finance': RAW_CAMPAIGN_FINANCE_DIR,
+            'demographics': RAW_DEMOGRAPHICS_DIR, 'elections': RAW_ELECTIONS_DIR,
+            'texts': RAW_TEXTS_DIR, 'amendments': RAW_AMENDMENTS_DIR,
+            'supplements': RAW_SUPPLEMENTS_DIR, 'processed': PROCESSED_DATA_DIR
+        }
+        logger.debug(f"Updated data directories based on override: {DATA_DIRS}")
+
+
+    logger.info(f"--- Starting Data Collection Script ---")
+    start_time = datetime.now()
+    logger.info(f"State: {state_abbr}")
+    logger.info(f"Years: {args.start_year} - {args.end_year}")
+    logger.info(f"Base Raw Data Directory: {RAW_DIR.resolve()}")
+    logger.info(f"Base Processed Data Directory: {PROCESSED_DIR.resolve()}")
+    logger.info(f"Options: Skip API={args.skip_api}, Skip Scraping={args.skip_scraping}, Skip Matching={args.skip_matching}, Skip Consolidation={args.skip_consolidation}")
+    logger.info(f"Stub Collections Triggered: Finance={args.collect_finance}, Demographics={args.collect_demographics}, Elections={args.collect_elections}")
+
+
+    # Create all necessary directories upfront using Path.mkdir
+    for dir_key, dir_path in DATA_DIRS.items():
+        try:
+            dir_path.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Ensured directory exists: {dir_path}")
+        except OSError as e:
+            logger.error(f"FATAL: Failed to create directory {dir_path}: {e}. Check permissions.")
+            sys.exit(1)
+
+    # --- LegiScan API Collection Phase ---
+    sessions = []
+    if not args.skip_api:
+        logger.info("--- Starting LegiScan API Collection Phase ---")
+        try:
+            sessions = get_session_list(state_abbr, years_to_process)
+            if not sessions:
+                logger.error(f"No relevant sessions found via API for {state_abbr} in {args.start_year}-{args.end_year}. API collection will yield limited/no data.")
+            else:
+                 # Collect unique legislators across all relevant sessions first
+                 # This is important for matching scraped data later
+                 collect_legislators(state_abbr, sessions)
+
+                 # Then process each session for its specific data
+                 for session in sessions:
+                     session_year = session.get('year_start', 'UnknownYear')
+                     session_name = session.get('session_name', f"ID: {session.get('session_id')}")
+                     logger.info(f"--- Processing Session: {session_name} ({session_year}) ---")
+                     collect_committee_definitions(session)
+                     collect_bills_votes_sponsors(session)
+                     # Potential future additions:
+                     # collect_texts_amendments_supplements(session) # If fetching full docs
+
+        except Exception as e:
+            logger.critical(f"Unhandled exception during LegiScan API collection phase: {str(e)}", exc_info=True)
+            # Consider if script should exit or continue to other phases
+            # sys.exit(1) # Exit if API is critical and failed badly
+    else:
+        logger.info("Skipping LegiScan API data collection as requested.")
+        # If skipping API, we might still want to load existing legislator data for matching
+        # Or assume it exists from a previous run. Matching logic handles missing file.
+
+    # --- Web Scraping Phase (State-Specific) ---
+    scraped_memberships_raw_json_file = None
+    if not args.skip_scraping:
+         # Check if state has scraping config - currently only 'ID'
+         state_configs_for_scraping = ['ID'] # List states with implemented scrapers
+         if state_abbr in state_configs_for_scraping:
+             logger.info(f"--- Starting Web Scraping Phase ({state_abbr} - Current Year Committee Memberships) ---")
+             try:
+                  scraped_memberships_raw_json_file = scrape_committee_memberships(state_abbr)
+                  if not scraped_memberships_raw_json_file:
+                      logger.warning(f"Web scraping for {state_abbr} did not produce an output file.")
+             except Exception as e:
+                  logger.critical(f"Unhandled exception during web scraping for {state_abbr}: {str(e)}", exc_info=True)
+         else:
+              logger.warning(f"Web scraping is not currently implemented for state: {state_abbr}. Skipping scraping.")
+    else:
+         logger.info("Skipping web scraping as requested.")
+
+
+    # --- Matching Phase (Scraped Data to API Data) ---
+    matched_output_csv_file = None # Track the path to the output file
+    if not args.skip_matching:
+        # Determine the expected path for the raw scraped file from the CURRENT year
+        current_year = datetime.now().year
+        expected_scraped_file = RAW_COMMITTEE_MEMBERSHIPS_DIR / str(current_year) / f'scraped_memberships_raw_{state_abbr}_{current_year}.json'
+
+        # Check if EITHER the file was just created OR if it exists from a previous run (if scraping was skipped this time)
+        if scraped_memberships_raw_json_file or expected_scraped_file.exists():
+            # Prioritize the newly created file path if scraping ran
+            file_to_match = scraped_memberships_raw_json_file if scraped_memberships_raw_json_file else str(expected_scraped_file)
+            logger.info(f"--- Starting Scraped Member Matching Phase using: {file_to_match} ---")
+
+            # Define path to the consolidated legislator file (needed for matching)
+            legislators_json_file = RAW_LEGISLATORS_DIR / f'all_legislators_{state_abbr}.json'
+
+            if legislators_json_file.exists():
+                 # Define the output path for the matched CSV (always in processed dir)
+                 matched_output_csv_path = PROCESSED_DATA_DIR / f'committee_memberships_scraped_matched_{state_abbr}_{current_year}.csv'
+
+                 try:
+                     # Pass paths as strings to the function
+                     match_scraped_legislators(
+                         file_to_match,
+                         str(legislators_json_file),
+                         str(matched_output_csv_path)
+                     )
+                     if matched_output_csv_path.exists():
+                        matched_output_csv_file = str(matched_output_csv_path) # Store path if successful
+                 except Exception as e:
+                     logger.critical(f"Unhandled exception during legislator matching: {str(e)}", exc_info=True)
+            else:
+                 logger.warning(f"Skipping legislator matching: Consolidated legislator JSON file not found at {legislators_json_file}. (Run without --skip-api first?)")
+        elif args.skip_scraping:
+            logger.info(f"Skipping matching: Web scraping was skipped and no pre-existing raw scraped file found at {expected_scraped_file}.")
+        else:
+            logger.info("Skipping matching: No scraped data available (scraping may have failed or produced no output).")
+    else:
+        logger.info("Skipping legislator matching as requested.")
+
+
+    # --- Data Consolidation Phase ---
+    if not args.skip_consolidation:
+         logger.info("--- Starting Data Consolidation Phase ---")
+         try:
+             # Consolidate API data per year (only if API wasn't skipped)
+             if not args.skip_api:
+                 logger.info("Consolidating yearly API data...")
+                 # Define columns for each consolidated file
+                 committee_cols = ['committee_id', 'name', 'chamber', 'chamber_id', 'session_id', 'year']
+                 bill_cols = ['bill_id', 'change_hash', 'session_id', 'year', 'state', 'state_id', 'url', 'state_link',
+                              'number', 'type', 'type_id', 'body', 'body_id', 'current_body', 'current_body_id',
+                              'title', 'description', 'status', 'status_desc', 'status_date',
+                              'pending_committee_id', 'subjects', 'subject_ids', 'sast_relations',
+                              'text_stubs', 'amendment_stubs', 'supplement_stubs']
+                 sponsor_cols = ['bill_id', 'legislator_id', 'sponsor_type_id', 'sponsor_type', 'sponsor_order',
+                                 'committee_sponsor', 'committee_id', 'session_id', 'year']
+                 vote_cols = ['vote_id', 'bill_id', 'legislator_id', 'vote_id_type', 'vote_text', 'vote_value',
+                              'date', 'description', 'yea', 'nay', 'nv', 'absent', 'total', 'passed',
+                              'chamber', 'chamber_id', 'session_id', 'year']
+
+                 consolidate_yearly_data('committees', years_to_process, committee_cols, state_abbr)
+                 consolidate_yearly_data('bills', years_to_process, bill_cols, state_abbr)
+                 consolidate_yearly_data('sponsors', years_to_process, sponsor_cols, state_abbr)
+                 consolidate_yearly_data('votes', years_to_process, vote_cols, state_abbr)
+             else:
+                 logger.info("Skipping yearly API data consolidation as API collection was skipped.")
+
+             # Consolidate scraped/matched membership data across all specified years
+             # This relies on potentially multiple matched files existing from previous runs or the current run
+             if not args.skip_scraping and not args.skip_matching:
+                 logger.info("Consolidating matched scraped membership data across all specified years...")
+                 consolidate_membership_data(years_to_process, state_abbr)
+             elif args.skip_scraping:
+                 logger.info("Skipping consolidation of scraped memberships (scraping was skipped).")
+             elif args.skip_matching:
+                 logger.info("Skipping consolidation of scraped memberships (matching was skipped).")
+             else:
+                  # If both scraping and matching were skipped, still attempt consolidation
+                  # in case pre-existing matched files are present for the years.
+                  logger.info("Attempting consolidation of potentially pre-existing matched membership files...")
+                  consolidate_membership_data(years_to_process, state_abbr)
+
+         except Exception as e:
+             logger.critical(f"Unhandled exception during data consolidation: {str(e)}", exc_info=True)
+    else:
+        logger.info("Skipping data consolidation as requested.")
+
+
+    # --- Trigger New Data Source Stubs ---
+    if args.collect_finance:
+        collect_campaign_finance(state_abbr, years_to_process)
+    if args.collect_demographics:
+        collect_district_demographics(state_abbr)
+    if args.collect_elections:
+        collect_election_history(state_abbr, years_to_process)
+
+
+    # --- Script Finish ---
+    end_time = datetime.now()
+    logger.info(f"--- Data Collection Script Finished ---")
+    logger.info(f"Total execution time: {end_time - start_time}")
+    logging.shutdown() # Ensure logs are flushed
+
+if __name__ == "__main__":
+    main()
+
