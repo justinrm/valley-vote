@@ -336,45 +336,75 @@ def setup_project_paths(base_dir_override: Optional[Union[str, Path]] = None) ->
         # Use default from config, resolve to absolute path
         base_dir = DEFAULT_BASE_DATA_DIR.resolve()
 
+    # Define main directories
+    raw_data_dir = base_dir / 'raw'
+    processed_data_dir = base_dir / 'processed'
+    artifacts_dir = base_dir / 'artifacts'
+    log_dir = base_dir / 'logs'
+
+    # Define subdirectories within 'raw'
+    raw_sessions_dir = raw_data_dir / 'sessions'
+    raw_legislators_dir = raw_data_dir / 'legislators'
+    raw_committees_dir = raw_data_dir / 'committees'
+    raw_bills_dir = raw_data_dir / 'bills'
+    raw_votes_dir = raw_data_dir / 'votes'
+    raw_sponsors_dir = raw_data_dir / 'sponsors'
+    # Add new raw directories for documents
+    raw_texts_dir = raw_data_dir / 'texts'
+    raw_amendments_dir = raw_data_dir / 'amendments'
+    raw_supplements_dir = raw_data_dir / 'supplements'
+
+    # Define subdirectories within 'artifacts' (e.g., for monitoring, scraping state)
+    monitor_dir = artifacts_dir / 'monitor'
+    finance_scraped_dir = artifacts_dir / 'finance_scraped' # Raw files from finance scraping
+
+    # Define subdirectories within 'processed' (e.g., for yearly consolidated files)
+    processed_committee_memberships_dir = processed_data_dir / 'committee_memberships'
+    processed_finance_dir = processed_data_dir / 'finance_matched' # Matched finance data
+
+    # Create all directories
+    dirs_to_create = [
+        raw_data_dir, processed_data_dir, artifacts_dir, log_dir,
+        raw_sessions_dir, raw_legislators_dir, raw_committees_dir,
+        raw_bills_dir, raw_votes_dir, raw_sponsors_dir,
+        raw_texts_dir, raw_amendments_dir, raw_supplements_dir, # Ensure new dirs are created
+        monitor_dir, finance_scraped_dir,
+        processed_committee_memberships_dir, processed_finance_dir
+    ]
+    for dir_path in dirs_to_create:
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+    # --- Path Dictionary ---
     paths = {
         'base': base_dir,
-        # Core output directories
-        'log': base_dir / 'logs',                # Dedicated log directory
-        'raw': base_dir / 'raw',
-        'processed': base_dir / 'processed',
-        'artifacts': base_dir / 'artifacts',     # General place for non-raw/processed outputs
-
-        # Specific Raw Subdirectories (add more as needed based on data types)
-        'raw_legislators': base_dir / 'raw' / 'legislators',
-        'raw_bills': base_dir / 'raw' / 'bills',
-        'raw_votes': base_dir / 'raw' / 'votes',
-        'raw_committees': base_dir / 'raw' / 'committees',
-        'raw_committee_memberships': base_dir / 'raw' / 'committee_memberships',
-        'raw_sponsors': base_dir / 'raw' / 'sponsors',
-        'raw_campaign_finance': base_dir / 'raw' / 'campaign_finance',  # Top level for finance
-        'raw_texts': base_dir / 'raw' / 'texts',
-        'raw_amendments': base_dir / 'raw' / 'amendments',
-        'raw_supplements': base_dir / 'raw' / 'supplements',
-        'raw_monitor_artifacts': base_dir / 'artifacts' / 'monitor',  # Store monitor HTML etc.
-
-        # Specific Processed Files (can be defined here or constructed in main scripts)
-        # e.g., 'processed_legislators_csv': base_dir / 'processed' / 'legislators_{state}.csv'
+        'raw': raw_data_dir,
+        'processed': processed_data_dir,
+        'artifacts': artifacts_dir,
+        'log': log_dir,
+        # Raw Subdirs
+        'raw_sessions': raw_sessions_dir,
+        'raw_legislators': raw_legislators_dir,
+        'raw_committees': raw_committees_dir,
+        'raw_bills': raw_bills_dir,
+        'raw_votes': raw_votes_dir,
+        'raw_sponsors': raw_sponsors_dir,
+        'raw_texts': raw_texts_dir,
+        'raw_amendments': raw_amendments_dir,
+        'raw_supplements': raw_supplements_dir,
+        # Raw Committee Membership (scraped, needs matching)
+        'raw_committee_memberships': monitor_dir, # Store raw scraped JSON/HTML here
+        # Artifact Subdirs
+        'monitor': monitor_dir,
+        'finance_scraped': finance_scraped_dir,
+        # Processed Subdirs
+        'processed_committee_memberships': processed_committee_memberships_dir,
+        'processed_finance': processed_finance_dir,
     }
 
-    # Create all defined directory paths
-    created_dirs = set()
-    for key, path_obj in paths.items():
-        # Check if it looks like a directory path (heuristic: no suffix or common dir names)
-        is_likely_dir = not path_obj.suffix or key in ['log', 'raw', 'processed', 'artifacts'] or 'raw_' in key or '_artifacts' in key
-        if is_likely_dir:
-            try:
-                path_obj.mkdir(parents=True, exist_ok=True)
-                created_dirs.add(str(path_obj))
-            except OSError as e:
-                # Use standard logging as specific logger might not be set up
-                logging.critical(f"FATAL: Failed to create directory {path_obj}: {e}. Check permissions.")
-                sys.exit(1) # Essential directories must be created
+    # Log the created paths (optional, but helpful for debugging)
+    # logger = logging.getLogger(__name__)
+    # logger.info(f"Project paths initialized. Base: {base_dir}")
+    # for key, path in paths.items():
+    #     logger.debug(f"Path '{key}': {path}")
 
-    logging.info(f"Project paths setup. Base directory: {paths['base']}")
-    logging.debug(f"Ensured directories exist: {', '.join(sorted(list(created_dirs)))}")
     return paths

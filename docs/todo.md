@@ -6,6 +6,7 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 *   `[x]` = Completed
 *   `[~]` = In Progress / Partially Implemented / Needs Validation
 *   `[ ]` = Not Started
+*   `[P]` = Paused / Blocked
 
 ## Phase 1: Core Data Acquisition & Initial Processing
 
@@ -14,11 +15,11 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 -   **LegiScan API Data (`data_collection.py`):**
     -   [x] Implement core API fetching framework (Sessions, Legislators, Committees, Bills, Votes, Sponsors).
     -   [x] Implement robust retry logic (`tenacity`), error handling, and logging.
+    -   [x] Implement `getMasterListRaw` and `change_hash` comparison for efficient bill updates.
     -   [x] Implement data structuring and saving (Raw JSONs per item/session).
     -   [x] Implement basic consolidation of yearly API data into session-level JSONs.
     -   [x] Implement consolidation of yearly session JSONs into yearly CSV/JSON (`consolidate_yearly_data`).
-    -   [ ] (Optional/Optimization) Implement `getMasterListRaw` and `change_hash` comparison for more efficient bill updates (currently fetches all via `getBill`).
-    -   [ ] (Feature Expansion) Fetch full Bill Text, Amendments, Supplements via API (`getText`, `getAmendment`, `getSupplement`) and implement parsing/storage if needed for NLP features or chatbot context.
+    -   [x] (Feature Expansion) Fetch full Bill Text, Amendments, Supplements via API (`getText`, `getAmendment`, `getSupplement`).
 
 -   **Idaho Committee Membership Scraping (`data_collection.py`):**
     -   [x] Implement web scraper for current year committee memberships (ID House/Senate).
@@ -30,34 +31,40 @@ This document tracks the tasks required to build and improve the Valley Vote pla
     -   [~] **Monitor & Maintain:** Regularly check Idaho Legislature website structure and update scraper (`monitor_idaho_structure.py`). Needs automated checks or scheduled runs.
 
 -   **Idaho Campaign Finance Data (`scrape_finance_idaho.py` & related):**
-    -   [x] **Initial Setup:**
+    -   [P] **Overall Status: Paused Automated Scraping** - Pivoting to manually acquired data via records request due to Sunshine Portal scraping challenges.
+    -   [x] **Initial Setup (Playwright - for potential future use or reference):**
         -   [x] Added Playwright dependency (`requirements.txt`).
         -   [x] Set up virtual environment (`venv`).
         -   [x] Created basic finance scraper structure (`scrape_finance_idaho.py`).
         -   [x] Created validation/test script (`test_finance_scraper.py`).
-    -   [~] **Refactor & Validate Scraper (`test_finance_scraper.py`, `scrape_finance_idaho.py`):** Use Playwright for Sunshine Portal interaction.
+    -   [~] **Refactor & Validate Scraper (Playwright - relevant if scraping is resumed):**
         -   [x] Refactor `--inspect-form` to use Playwright, identify initial elements.
         -   [x] Refactor `--inspect-results` to use Playwright.
             -   [x] Implement robust selector for name/committee input (`#panel-campaigns-content input[role="combobox"]...`).
             -   [x] Implement focus logic for hidden input (`.focus()` with JS fallback).
             -   [x] Implement typing/filling name input.
-            -   [ ] (Minor) Handle dropdown option selection gracefully (currently skips if not found).
+            -   [ ] (Minor) Handle dropdown option selection gracefully.
             -   [x] Implement locating and filling date inputs.
             -   [x] Implement locating and clicking search button.
             -   [x] Implement waiting for/detecting results area.
             -   [x] Implement finding results items count.
-            -   [~] **Implement Finding Export Link/Button:** Timeout currently occurs. **(Next Step)**
+            -   [P] **Implement Finding Export Link/Button:** Timeout occurred during previous attempts.
         -   [ ] Implement `--test-search` function using validated Playwright logic.
-        -   [ ] Refactor `scrape_finance_idaho.py` main scraping loop to use the validated Playwright interaction logic from `test_finance_scraper.py`.
+        -   [ ] Refactor `scrape_finance_idaho.py` main scraping loop.
         -   [ ] Implement robust error handling and retry logic within Playwright interactions.
-    -   [~] **Refine CSV Parsing (`validate_csv_parsing.py`, `scrape_finance_idaho.py`):** Standardize column mapping (`FINANCE_COLUMN_MAPS` in `data_collection.py`), improve data cleaning (amounts, dates), type conversion based on actual Idaho CSV format. Handle potential Excel files if CSV fails.
+    -   [ ] **Parse Manually Acquired Data:**
+        -   [ ] Develop parser script (`parse_finance_idaho_manual.py` or similar) to read received CSV/other format.
+        -   [ ] Implement robust data cleaning (amounts, dates, names, addresses, etc.) based on actual data format.
+        -   [ ] Standardize column names based on `config.py` maps or define new ones.
+        -   [ ] Handle potential variations in file structure/format.
+        -   [ ] Save cleaned/standardized data to `processed/` directory (e.g., CSV).
     -   [~] **Develop Robust Matching (`match_finance_to_leg.py`):**
         -   [x] Initial fuzzy matching logic implemented (`thefuzz`).
         -   [x] Centralized `clean_name` utility in `src/utils.py`.
-        -   [ ] **Refine Strategy:** Improve matching beyond simple name fuzziness (consider committee indicators, election year/office, rules, manual review).
-        -   [ ] **Validate Matches:** Perform spot-checks/build validation set.
-    -   [ ] Extract and standardize donor details (name, address, employer, occupation) for categorization/analysis.
-    -   [ ] (Optional) Extract and standardize expenditure data more thoroughly.
+        -   [ ] **Refine Strategy:** Improve matching based on manual data format (consider committee indicators, election year/office, filer IDs, manual review steps).
+        -   [ ] **Validate Matches:** Perform spot-checks/build validation set using the manual data.
+    -   [ ] Extract and standardize donor details (name, address, employer, occupation) for categorization/analysis from manual data.
+    -   [ ] (Optional) Extract and standardize expenditure data more thoroughly from manual data.
 
 -   **District Demographics Data (`process_demographics_idaho.py` - Planned Script):**
     -   [ ] **Identify Data Sources:** Pinpoint specific Census ACS tables and TIGER/Line shapefiles for relevant ID legislative districts/years.

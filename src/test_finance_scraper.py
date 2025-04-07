@@ -347,81 +347,84 @@ def inspect_search_results(base_url: str, paths: Dict[str, Path]):
                 browser.close()
                 return
 
-            # --- Click Search ---
+            # --- Submit Search ---
+            logger.info("Clicking search button...")
+            search_button = page.locator(search_button_selector).first
+            search_button.click(timeout=10000)
+            logger.info("Search submitted. Waiting for results grid/table to appear...")
+
+            # --- Wait for Results Grid & Locate Export Button ---
+            # Refined waiting strategy: Wait for a specific element within the results grid
+            # Placeholder Selector (NEEDS VERIFICATION ON LIVE SITE) - e.g., header cell in AG Grid
+            # Correct syntax: comma-separated string for OR logic
+            results_grid_indicator_selector = 'div[role="columnheader"][class*="header-cell-label"], div.ag-header-cell-text'
+            results_count = 0
+
             try:
-                logger.info(f"Locating and clicking search button: {search_button_selector}")
-                search_button = page.locator(search_button_selector).first
-                search_button.click(timeout=10000)
-                logger.info("Search button clicked. Waiting for navigation or results...")
-                # Wait for potential navigation or results area update
-                # Option 1: Wait for navigation (if search triggers full page load)
-                # page.wait_for_load_state('domcontentloaded', timeout=30000)
-                # Option 2: Wait for results area to appear/update (if dynamic)
-                page.locator(results_area_selector).first.wait_for(state='visible', timeout=30000)
-                logger.info("Results area detected.")
+                logger.info(f"Waiting for results grid indicator: {results_grid_indicator_selector}")
+                page.locator(results_grid_indicator_selector).first.wait_for(state='visible', timeout=45000) # Increased timeout
+                logger.info("Results grid indicator found. Grid seems loaded.")
+                page.wait_for_timeout(2000) # Short delay for stability
 
-            except PlaywrightTimeoutError as e_timeout:
-                logger.error(f"Timeout clicking search or waiting for results: {e_timeout}")
-                save_debug_html(page, "inspect_results_search_timeout", paths)
-                browser.close()
-                return
-            except Exception as e_search:
-                logger.error(f"Error clicking search or waiting for results: {e_search}", exc_info=True)
-                save_debug_html(page, "inspect_results_search_error", paths)
-                browser.close()
-                return
+                # Try to count results items (optional, but good feedback)
+                try:
+                    results_items = page.locator(results_item_selector)
+                    results_count = results_items.count()
+                    logger.info(f"Found approximately {results_count} result items using selector: {results_item_selector}")
+                except Exception as e_count:
+                    logger.warning(f"Could not count results items: {e_count}")
 
-            # --- Inspect Results ---
-            logger.info("Inspecting search results area...")
-            save_debug_html(page, "inspect_results_final_page", paths) # Save final state
+                # --- Locate and interact with the Export Button ---
+                # Refined Placeholder Selector (NEEDS VERIFICATION ON LIVE SITE)
+                # Examples: button with specific title, attribute, or text
+                refined_export_selector = 'button[title*="Export" i], button:has-text("Export to CSV"), a:has-text("Export")'
+                logger.info(f"Attempting to find export button using: {refined_export_selector}")
+                export_button = page.locator(refined_export_selector).first # Assume first match
 
-            results_summary = {}
-            try:
-                # Check for results area
-                results_container = page.locator(results_area_selector).first
-                results_container.wait_for(state='visible', timeout=5000)
-                logger.info(f"Found results area matching: {results_area_selector}")
-                results_summary['results_area_found'] = True
+                logger.info("Waiting for export button to be visible/enabled...")
+                try:
+                    export_button.wait_for(state='visible', timeout=20000)
+                    # export_button.wait_for(state='enabled', timeout=15000) # Optionally wait for enabled
+                    logger.info("Export button located and appears visible.")
 
-                # Check for individual items within the results area
-                items = results_container.locator(results_item_selector)
-                item_count = items.count()
-                logger.info(f"Found {item_count} potential result items using: {results_item_selector}")
-                results_summary['results_item_count'] = item_count
-                # Log text of first few items for context
-                for i in range(min(item_count, 3)):
-                    item_text = items.nth(i).text_content(timeout=1000)
-                    logger.info(f"  - Item {i+1} text: {item_text[:100].strip()}...")
+                    # --- Attempt to Click --- ## THIS IS THE KEY PART TO FIX ##
+                    logger.info("Attempting to click the export button...")
+                    # For inspection purposes, clicking might be enough.
+                    # For actual scraping, handling the download event triggered by the click is needed.
+                    export_button.click(timeout=10000)
+                    logger.info("Export button clicked successfully (or click command sent). Inspect manually or check for download event.")
+                    page.wait_for_timeout(3000) # Pause to observe result if running headful
 
-                # Check for export link
-                export_link = page.locator(export_link_selector).first
-                export_link.wait_for(state='visible', timeout=5000)
-                logger.info(f"Found export link matching: {export_link_selector}")
-                results_summary['export_link_found'] = True
-                results_summary['export_link_text'] = export_link.text_content(timeout=1000)
-                results_summary['export_link_tag'] = export_link.evaluate('el => el.tagName.toLowerCase()')
-                results_summary['export_link_href'] = export_link.get_attribute('href')
+                except PlaywrightTimeoutError:
+                    logger.error(f"Timeout waiting for export button ({refined_export_selector}) to be visible/enabled after results grid appeared.")
+                    save_debug_html(page, "export_button_timeout", paths)
+                except Exception as e_export:
+                    logger.error(f"Error interacting with export button: {e_export}")
+                    save_debug_html(page, "export_button_error", paths)
 
             except PlaywrightTimeoutError:
-                logger.warning("Timeout finding results elements (area, items, or export link). Search might have failed or structure changed.")
-                results_summary['inspection_error'] = "Timeout finding expected elements"
-            except Exception as e_inspect:
-                 logger.error(f"Error inspecting results area: {e_inspect}", exc_info=True)
-                 results_summary['inspection_error'] = str(e_inspect)
+                logger.error(f"Timeout waiting for results grid indicator ({results_grid_indicator_selector}) to appear after search.")
+                save_debug_html(page, "results_grid_timeout", paths)
+            except Exception as e_results:
+                logger.error(f"Error waiting for results grid: {e_results}")
+                save_debug_html(page, "results_grid_error", paths)
+
+            # --- Final Summary & Cleanup ---
+            logger.info("Finished inspecting search results page.")
+            final_url = page.url
+            logger.info(f"Current URL after search: {final_url}")
+            if results_count > 0:
+                 logger.info(f"Search appeared successful ({results_count} items found). Check export button interaction logs.")
+            else:
+                 logger.warning("Search completed but no result items were detected, or counting failed. Check selectors and search terms.")
 
             browser.close()
 
         except Exception as e:
-            logger.error(f"Error during Playwright results inspection: {e}", exc_info=True)
+            logger.error(f"Error during Playwright search results inspection: {e}", exc_info=True)
+            if 'page' in locals(): save_debug_html(page, "results_inspect_general_error", paths)
             if 'browser' in locals() and browser.is_connected():
                 browser.close()
-            return # Exit if setup failed
-
-        logger.info("Search Results Inspection Summary:")
-        for key, value in results_summary.items():
-            logger.info(f"  -> {key}: {value}")
-        if not results_summary.get('results_area_found') or not results_summary.get('export_link_found'):
-            logger.warning("Could not verify key elements (results area, export link) on the results page.")
 
 # --- Original test_search_functionality (Marked as needing refactor) ---
 

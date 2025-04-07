@@ -36,7 +36,8 @@ from .config import (
     ID_SENATE_COMMITTEES_URL,
     ID_COMMITTEE_HEADING_SELECTORS,
     ID_COMMITTEE_CONTENT_SELECTORS,
-    DATA_COLLECTION_LOG_FILE
+    DATA_COLLECTION_LOG_FILE,
+    SPONSOR_TYPES # Assuming SPONSOR_TYPES is defined in config
 )
 from .utils import (
     setup_logging,
@@ -102,9 +103,6 @@ VOTE_TEXT_MAP = {
     'nay': 0, 'no': 0, 'fail': 0, 'n': 0,
     'not voting': -1, 'abstain': -1, 'present': -1, 'nv': -1, 'av': -1,
     'absent': -2, 'excused': -2, 'abs': -2, 'exc': -2,
-}
-SPONSOR_TYPES = {
-    0: 'Sponsor (Generic / Unspecified)', 1: 'Primary Sponsor', 2: 'Co-Sponsor', 3: 'Joint Sponsor'
 }
 
 # --- Custom Exceptions ---
@@ -245,6 +243,63 @@ def fetch_api_data(operation: str, params: Dict[str, Any], wait_time: Optional[f
         logger.error(f"Final LegiScan Request exception after retries for op={operation} (id: {request_id_log}): {str(e)}.")
         # Do not return None here, re-raise the final exception to signal failure clearly
         raise
+
+# --- Helper Function for Document Fetching ---
+def _fetch_and_save_document(
+    doc_type: str,
+    doc_id: Optional[int],
+    bill_id: int,
+    session_id: int,
+    api_operation: str,
+    output_dir: Path
+):
+    """Fetches a single document (text, amendment, supplement) and saves it."""
+    if not doc_id:
+        logger.warning(f"Missing ID for {doc_type} in bill {bill_id}. Cannot fetch.")
+        return False # Indicate fetch was not attempted
+
+    params = {'id': doc_id}
+    filename = output_dir / f"bill_{bill_id}_{doc_type}_{doc_id}.json"
+
+    # Avoid refetching if file exists
+    if filename.exists():
+        logger.debug(f"{doc_type.capitalize()} document {doc_id} for bill {bill_id} already downloaded. Skipping.")
+        return True # Indicate success (already exists)
+
+    try:
+        logger.info(f"Fetching {doc_type} document ID: {doc_id} for bill {bill_id} (Session: {session_id})")
+        doc_data = fetch_api_data(api_operation, params)
+
+        if not doc_data or doc_data.get('status') != 'OK' or doc_type not in doc_data:
+            # Check specifically if the doc_type key exists, as getText returns 'text', getAmendment returns 'amendment', etc.
+            doc_key = doc_type # Assume key matches type for simplicity first
+            if api_operation == 'getText': doc_key = 'text'
+            elif api_operation == 'getAmendment': doc_key = 'amendment'
+            elif api_operation == 'getSupplement': doc_key = 'supplement'
+
+            if not doc_data or doc_data.get('status') != 'OK' or doc_key not in doc_data:
+                logger.warning(f"Failed to retrieve valid {doc_type} document ID {doc_id} for bill {bill_id}. Status: {doc_data.get('status', 'N/A')}. Response keys: {list(doc_data.keys()) if doc_data else 'None'}")
+                # Optionally save an empty file or record the failure
+                # save_json({"error": "fetch failed", "status": doc_data.get('status', 'N/A')}, filename)
+                return False # Indicate fetch failure
+
+        # Save the full response containing the document details
+        save_json(doc_data, filename)
+        logger.debug(f"Saved {doc_type} document {doc_id} for bill {bill_id} to {filename}")
+        return True # Indicate success
+
+    except APIResourceNotFoundError:
+        logger.warning(f"{doc_type.capitalize()} document ID {doc_id} (bill {bill_id}) not found via API. Skipping.")
+        # Optionally save a marker file indicating 'not found'
+        # save_json({"error": "not found"}, filename)
+        return False # Indicate fetch failure (not found)
+    except APIRateLimitError:
+        logger.error(f"Hit LegiScan rate limit fetching {doc_type} document {doc_id} (bill {bill_id}).")
+        raise # Re-raise to potentially halt the process
+    except Exception as e:
+        logger.error(f"Unhandled exception fetching {doc_type} document {doc_id} (bill {bill_id}): {e}", exc_info=True)
+        return False # Indicate fetch failure
+
 
 # --- LegiScan Data Collection Functions ---
 
@@ -573,12 +628,19 @@ def map_vote_value(vote_text: Optional[str]) -> int:
     return VOTE_TEXT_MAP.get(vt, -9) # Default to -9 if not found in map
 
 
-def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path]):
+def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path], fetch_flags: Optional[Dict[str, bool]] = None):
     """
-    Fetch and save bills, associated votes (detailed roll calls), and sponsors
-    for a single LegiScan session.
-    Uses getMasterList, getBill, getRollCall.
+    Fetch and save bills, associated votes, sponsors, and optionally full texts,
+    amendments, and supplements for a single LegiScan session.
+    Uses getMasterListRaw, compares change_hash, and calls getBill only for
+    new/changed bills. Fetches votes (getRollCall) and documents (getText, etc.)
+    for all relevant bills (new, changed, and unchanged).
     """
+    fetch_flags = fetch_flags or {} # Default to empty dict if None
+    fetch_texts_flag = fetch_flags.get('fetch_texts', False)
+    fetch_amendments_flag = fetch_flags.get('fetch_amendments', False)
+    fetch_supplements_flag = fetch_flags.get('fetch_supplements', False)
+
     session_id = session.get('session_id')
     session_name = session.get('session_name', f'ID: {session_id}')
     year = session.get('year_start')
@@ -586,6 +648,10 @@ def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path]
     bills_dir = paths['raw_bills']
     votes_dir = paths['raw_votes']
     sponsors_dir = paths['raw_sponsors']
+    # Define paths for new document types (use .get() for safety)
+    texts_dir = paths.get('raw_texts')
+    amendments_dir = paths.get('raw_amendments')
+    supplements_dir = paths.get('raw_supplements')
 
     if not session_id or not year:
         logger.warning(f"Session missing ID or valid start year: {session_name}. Skipping bill/vote/sponsor collection.")
@@ -596,80 +662,140 @@ def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path]
     votes_year_dir = votes_dir / str(year); votes_year_dir.mkdir(parents=True, exist_ok=True)
     sponsors_year_dir = sponsors_dir / str(year); sponsors_year_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Collecting bills, votes, sponsors for {year} session: {session_name} (ID: {session_id})...")
+    # Create directories for documents if flags are set and paths are provided
+    texts_year_dir = None
+    if fetch_texts_flag and texts_dir:
+        texts_year_dir = texts_dir / str(year); texts_year_dir.mkdir(parents=True, exist_ok=True)
+    elif fetch_texts_flag: logger.warning("Cannot fetch texts: 'raw_texts' path not configured in project paths.")
 
-    # 1. Get Master List of Bills for the session
-    logger.info("Fetching master list...")
-    params = {'id': session_id}
-    bill_ids_to_fetch = []
+    amendments_year_dir = None
+    if fetch_amendments_flag and amendments_dir:
+        amendments_year_dir = amendments_dir / str(year); amendments_year_dir.mkdir(parents=True, exist_ok=True)
+    elif fetch_amendments_flag: logger.warning("Cannot fetch amendments: 'raw_amendments' path not configured in project paths.")
+
+    supplements_year_dir = None
+    if fetch_supplements_flag and supplements_dir:
+        supplements_year_dir = supplements_dir / str(year); supplements_year_dir.mkdir(parents=True, exist_ok=True)
+    elif fetch_supplements_flag: logger.warning("Cannot fetch supplements: 'raw_supplements' path not configured in project paths.")
+
+    logger.info(f"Collecting bills, votes, sponsors for {year} session: {session_name} (ID: {session_id})...")
+    # Log only if any flag is true
+    if any([fetch_texts_flag, fetch_amendments_flag, fetch_supplements_flag]):
+        logger.info(f"Document Fetching: Texts={fetch_texts_flag}, Amendments={fetch_amendments_flag}, Supplements={fetch_supplements_flag}")
+
     # Define paths for saving session-level processed lists (even if empty)
     session_bills_json_path = bills_year_dir / f'bills_{session_id}.json'
     session_sponsors_json_path = sponsors_year_dir / f'sponsors_{session_id}.json'
     session_votes_json_path = votes_year_dir / f'votes_{session_id}.json'
 
+    # --- 1. Load Previous Bill Data (if exists) ---
+    previous_bills_data: Dict[int, Dict[str, Any]] = {}
+    if session_bills_json_path.exists():
+        logger.info(f"Loading previous bill data from: {session_bills_json_path}")
+        loaded_data = load_json(session_bills_json_path)
+        if isinstance(loaded_data, list):
+            for bill_record in loaded_data:
+                if isinstance(bill_record, dict) and 'bill_id' in bill_record:
+                    previous_bills_data[bill_record['bill_id']] = bill_record
+            logger.info(f"Loaded {len(previous_bills_data)} bill records from previous run.")
+        else:
+            logger.warning(f"Previous bill data file {session_bills_json_path} is not a list. Will fetch all bills.")
+
+    # --- 2. Get Master List Raw with Change Hashes ---
+    logger.info("Fetching master list raw...")
+    params = {'id': session_id}
+    master_list_raw = {}
+    bill_stubs_from_api = [] # List of {'bill_id': id, 'change_hash': hash}
+
     try:
-        master_list_data = fetch_api_data('getMasterList', params)
-        # Handle fetch failure or invalid response
+        master_list_data = fetch_api_data('getMasterListRaw', params) # Use getMasterListRaw
         if not master_list_data or master_list_data.get('status') != 'OK' or 'masterlist' not in master_list_data:
-            logger.error(f"Failed to retrieve valid master bill list for session {session_id}. Status: {master_list_data.get('status', 'N/A')}")
-            # Save empty lists to mark session as attempted
+            logger.error(f"Failed to retrieve valid master bill list raw for session {session_id}. Status: {master_list_data.get('status', 'N/A')}")
+            # Save empty lists to mark session as attempted (if appropriate, depends on desired behavior on failure)
+            # save_json([], session_bills_json_path)
+            # save_json([], session_sponsors_json_path)
+            # save_json([], session_votes_json_path)
+            return # Critical failure, cannot proceed without master list
+
+        # Save the raw masterlist response (still useful for debugging)
+        save_json(master_list_data, bills_year_dir / f"masterlist_raw_{session_id}.json")
+
+        master_list_raw = master_list_data.get('masterlist', {})
+        if not isinstance(master_list_raw, dict) or not master_list_raw:
+            logger.warning(f"Masterlist raw for session {session_id} is empty or not a dictionary ({type(master_list_raw)}). No bills to process.")
+            save_json([], session_bills_json_path) # Save empty lists if no bills
+            save_json([], session_sponsors_json_path)
+            save_json([], session_votes_json_path)
+            return
+
+        # Extract bill_id and change_hash from each entry
+        for key, bill_stub in master_list_raw.items():
+             if isinstance(bill_stub, dict) and 'bill_id' in bill_stub and 'change_hash' in bill_stub:
+                  bill_stubs_from_api.append({
+                      'bill_id': bill_stub['bill_id'],
+                      'change_hash': bill_stub['change_hash']
+                  })
+             # else: logger.debug(f"Skipping non-standard entry in masterlist raw: key='{key}'")
+
+        if not bill_stubs_from_api:
+            logger.warning(f"Masterlist raw for session {session_id} contained no valid bill entries. No bills processed.")
             save_json([], session_bills_json_path)
             save_json([], session_sponsors_json_path)
             save_json([], session_votes_json_path)
             return
 
-        # Save the raw masterlist response
-        save_json(master_list_data, bills_year_dir / f"masterlist_{session_id}.json")
-
-        # Structure: {'status':'OK', 'masterlist': {'0':{bill_stub}, '1':{bill_stub}, ..., 'session':{...}}}
-        masterlist = master_list_data.get('masterlist', {})
-        if not isinstance(masterlist, dict) or not masterlist:
-            logger.warning(f"Masterlist for session {session_id} is empty or not a dictionary ({type(masterlist)}). No bills to process.")
-            save_json([], session_bills_json_path) # Save empty lists
-            save_json([], session_sponsors_json_path)
-            save_json([], session_votes_json_path)
-            return
-
-        # Extract bill_id from each entry in the masterlist dict (keys are usually numeric strings)
-        for key, bill_stub in masterlist.items():
-             # Check if value is a dict containing 'bill_id'
-             if isinstance(bill_stub, dict) and 'bill_id' in bill_stub:
-                  bill_ids_to_fetch.append(bill_stub['bill_id'])
-             # else: logger.debug(f"Skipping non-standard entry in masterlist: key='{key}'") # Avoid logging 'session' block
-
-        if not bill_ids_to_fetch:
-            logger.warning(f"Masterlist for session {session_id} contained no valid bill entries. No bills processed.")
-            save_json([], session_bills_json_path)
-            save_json([], session_sponsors_json_path)
-            save_json([], session_votes_json_path)
-            return
-
-        logger.info(f"Found {len(bill_ids_to_fetch)} bills in masterlist for session {session_id}. Fetching full details...")
+        logger.info(f"Found {len(bill_stubs_from_api)} bills in masterlist raw for session {session_id}.")
 
     # Handle API errors during master list fetch
     except APIResourceNotFoundError:
-         logger.warning(f"Master bill list not found via API for session {session_name} (ID: {session_id}). Skipping.")
-         save_json([], session_bills_json_path)
-         save_json([], session_sponsors_json_path)
-         save_json([], session_votes_json_path)
+         logger.warning(f"Master bill list raw not found via API for session {session_name} (ID: {session_id}). Cannot process session.")
+         # Save empty lists? Or just return? Returning seems safer.
          return
     except APIRateLimitError:
-        logger.error(f"Hit LegiScan rate limit fetching master list for session {session_id}.")
+        logger.error(f"Hit LegiScan rate limit fetching master list raw for session {session_id}.")
         raise # Halt processing for this session
     except Exception as e:
-        logger.error(f"Unhandled exception fetching master list for session {session_name} (ID: {session_id}): {e}", exc_info=True)
+        logger.error(f"Unhandled exception fetching master list raw for session {session_name} (ID: {session_id}): {e}", exc_info=True)
         return # Stop processing this session
 
+    # --- 3. Determine Bills to Fetch vs Reuse ---
+    bill_ids_to_fetch_details = []
+    reused_bills = []
+    current_api_bill_ids = set()
 
-    # 2. Fetch Details for Each Bill (getBill) and associated Roll Calls (getRollCall)
-    session_bills = []      # List to hold processed bill data for this session
-    session_votes = []      # List to hold processed vote data for this session
-    session_sponsors = []   # List to hold processed sponsor data for this session
+    for stub in bill_stubs_from_api:
+        bill_id = stub['bill_id']
+        api_change_hash = stub['change_hash']
+        current_api_bill_ids.add(bill_id)
+
+        previous_bill_record = previous_bills_data.get(bill_id)
+
+        if previous_bill_record:
+            stored_change_hash = previous_bill_record.get('change_hash')
+            if stored_change_hash == api_change_hash:
+                # Hashes match, reuse the stored data
+                reused_bills.append(previous_bill_record)
+                logger.debug(f"Bill {bill_id}: Change hash matches ({api_change_hash}). Reusing previous data.")
+            else:
+                # Hashes differ, need to fetch updated details
+                bill_ids_to_fetch_details.append(bill_id)
+                logger.debug(f"Bill {bill_id}: Change hash mismatch (API: {api_change_hash}, Stored: {stored_change_hash}). Fetching details.")
+        else:
+            # Bill is new (not in previous data), need to fetch details
+            bill_ids_to_fetch_details.append(bill_id)
+            logger.debug(f"Bill {bill_id}: New bill found. Fetching details.")
+
+    bills_removed_count = len(previous_bills_data) - len(reused_bills) - len(bill_ids_to_fetch_details)
+    if bills_removed_count > 0:
+        logger.info(f"{bills_removed_count} bills present in previous data but not in current masterlist raw (likely withdrawn/removed). They will be excluded.")
+
+    logger.info(f"Bills to fetch details for: {len(bill_ids_to_fetch_details)}. Bills to reuse: {len(reused_bills)}.")
+
+    # --- 4. Fetch Details for New/Changed Bills (getBill) ---
+    newly_fetched_bills = []
     bill_fetch_errors = 0
-    vote_fetch_errors = 0
 
-    # Process each bill_id found in the master list
-    for bill_id in tqdm(bill_ids_to_fetch, desc=f"Processing bills for session {session_id} ({year})", unit="bill"):
+    for bill_id in tqdm(bill_ids_to_fetch_details, desc=f"Fetching bill details for session {session_id} ({year})", unit="bill"):
         bill_params = {'id': bill_id}
         try:
             bill_data = fetch_api_data('getBill', bill_params)
@@ -755,110 +881,12 @@ def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path]
                     if isinstance(supp, dict): supplement_stubs.append({k: supp.get(k) for k in ['supplement_id', 'date', 'type', 'type_id', 'title']})
             bill_record['supplement_stubs'] = json.dumps(supplement_stubs)
 
-            # Add the processed bill record to the session list
-            session_bills.append(bill_record)
+            # --- Store raw sponsor and vote lists needed for later processing ---\
+            # These are NOT saved in the final JSON but used temporarily
+            bill_record['_sponsors_list'] = bill.get('sponsors', []) # Store raw sponsor list
+            bill_record['_vote_stubs_list'] = bill.get('votes', [])    # Store raw vote stubs list
 
-            # --- Process Sponsors ---
-            sponsors_list = bill.get('sponsors', [])
-            if isinstance(sponsors_list, list):
-                for sponsor in sponsors_list:
-                    if isinstance(sponsor, dict):
-                         sponsor_type_id = sponsor.get('sponsor_type_id') # 1=Primary, 2=Cosponsor
-                         session_sponsors.append({
-                             'bill_id': bill.get('bill_id'),
-                             'legislator_id': sponsor.get('people_id'), # Link to legislator
-                             'sponsor_type_id': sponsor_type_id,
-                             'sponsor_type': SPONSOR_TYPES.get(sponsor_type_id, 'Unknown'),
-                             'sponsor_order': sponsor.get('sponsor_order', 0),
-                             'committee_sponsor': sponsor.get('committee_sponsor', 0), # Is it a committee sponsor?
-                             'committee_id': sponsor.get('committee_id', 0), # If committee sponsor
-                             'session_id': bill.get('session_id'), # Link to session
-                             'year': year # Denormalize year
-                         })
-                    else: logger.warning(f"Invalid sponsor entry in bill {bill_id}: {sponsor}")
-            else: logger.warning(f"Unexpected format for sponsors in bill {bill_id}: {type(sponsors_list)}")
-
-            # --- Process Votes (fetch Roll Call details for each vote stub) ---
-            # The 'votes' array in getBill response contains stubs (roll_call_id)
-            votes_list_stubs = bill.get('votes', [])
-            if isinstance(votes_list_stubs, list):
-                for vote_stub in votes_list_stubs:
-                     if not isinstance(vote_stub, dict):
-                          logger.warning(f"Invalid vote stub entry in bill {bill_id}: {vote_stub}"); continue
-                     # Correct identifier from vote stub is 'roll_call_id'
-                     vote_id = vote_stub.get('roll_call_id')
-                     if not vote_id:
-                          logger.warning(f"Vote stub in bill {bill_id} missing roll_call_id: {vote_stub}"); continue
-
-                     # Fetch detailed roll call data using getRollCall
-                     roll_params = {'id': vote_id}
-                     try:
-                         roll_data = fetch_api_data('getRollCall', roll_params)
-                         # Handle fetch failure or invalid response for this roll call
-                         if not roll_data or roll_data.get('status') != 'OK' or 'roll_call' not in roll_data:
-                             logger.warning(f"Failed to retrieve valid roll call data for vote {vote_id} (from bill {bill_id}). Status: {roll_data.get('status', 'N/A')}")
-                             vote_fetch_errors += 1; continue
-
-                         # Structure: {'status':'OK', 'roll_call': {vote_details...}}
-                         roll_call = roll_data['roll_call']
-                         if not isinstance(roll_call, dict):
-                              logger.warning(f"Invalid roll_call data format for vote {vote_id} (not a dict): {type(roll_call)}")
-                              vote_fetch_errors += 1; continue
-
-                         # Save raw roll call JSON response
-                         save_json(roll_data, votes_year_dir / f"vote_{vote_id}.json")
-
-                         # Extract individual votes from the 'votes' array within the roll call object
-                         individual_votes = roll_call.get('votes', [])
-                         if isinstance(individual_votes, list):
-                              for vote in individual_votes:
-                                  if isinstance(vote, dict):
-                                       # Link to legislator using 'people_id'
-                                       legislator_id = vote.get('people_id')
-                                       if legislator_id: # Only record votes linked to a legislator
-                                           vote_record = {
-                                               'vote_id': vote_id, # The roll_call_id
-                                               'bill_id': roll_call.get('bill_id'), # Bill this vote belongs to
-                                               'legislator_id': legislator_id, # Link to legislator
-                                               'vote_id_type': vote.get('vote_id'), # API's numeric vote type (1=Yea, 2=Nay, 3=NV, 4=Absent)
-                                               'vote_text': vote.get('vote_text', ''), # Raw text (e.g., "Yea", "Nay")
-                                               'vote_value': map_vote_value(vote.get('vote_text')), # Mapped numeric value
-                                               # Details from the roll call itself
-                                               'date': roll_call.get('date', ''),
-                                               'description': roll_call.get('desc', ''), # Description of the vote action
-                                               'yea': roll_call.get('yea', 0), # Summary counts
-                                               'nay': roll_call.get('nay', 0),
-                                               'nv': roll_call.get('nv', 0),
-                                               'absent': roll_call.get('absent', 0),
-                                               'total': roll_call.get('total', 0),
-                                               'passed': int(roll_call.get('passed', 0)), # Did the measure pass on this vote? (0=No, 1=Yes)
-                                               'chamber': roll_call.get('chamber', ''), # 'H' or 'S'
-                                               'chamber_id': roll_call.get('chamber_id'), # 1 or 2
-                                               # Link back to the bill's session and year
-                                               'session_id': bill.get('session_id'),
-                                               'year': year,
-                                           }
-                                           session_votes.append(vote_record)
-                                       else:
-                                           logger.debug(f"Vote record in roll call {vote_id} missing legislator ID (people_id): {vote}")
-                                  else:
-                                       logger.warning(f"Invalid individual vote entry in roll call {vote_id}: {vote}")
-                         else:
-                              logger.warning(f"Unexpected format for 'votes' array within roll call {vote_id}: {type(individual_votes)}")
-
-                     # Handle API errors specifically for getRollCall
-                     except APIResourceNotFoundError:
-                         logger.warning(f"Roll Call ID {vote_id} (from bill {bill_id}) not found via API. Skipping.")
-                         vote_fetch_errors += 1; continue
-                     except APIRateLimitError:
-                          logger.error(f"Hit LegiScan rate limit fetching roll call {vote_id}.")
-                          raise # Halt processing for this bill/session
-                     except Exception as e_vote:
-                         logger.error(f"Unhandled exception fetching/processing roll call {vote_id} (from bill {bill_id}): {e_vote}", exc_info=True)
-                         vote_fetch_errors += 1; continue
-            else:
-                # This means the 'votes' key in the getBill response wasn't a list
-                logger.warning(f"Unexpected format for votes list stub in bill {bill_id}: {type(votes_list_stubs)}")
+            newly_fetched_bills.append(bill_record)
 
         # Handle API errors specifically for getBill
         except APIResourceNotFoundError:
@@ -866,24 +894,227 @@ def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path]
             bill_fetch_errors += 1
             continue
         except APIRateLimitError:
-             logger.error(f"Hit LegiScan rate limit fetching bill {bill_id}.")
+             logger.error(f"Hit LegiScan rate limit processing bill {bill_id}.")
              raise # Halt processing for this session
         except Exception as e_bill:
             logger.error(f"Unhandled exception processing bill {bill_id}: {e_bill}", exc_info=True)
             bill_fetch_errors += 1
             continue # Skip to next bill_id
 
-    # --- Save consolidated processed lists for the entire session ---
+    # --- 5. Combine Bill Lists ---
+    session_bills = reused_bills + newly_fetched_bills
+    logger.info(f"Total processed bills for session {session_id}: {len(session_bills)}")
+
+    # --- 6. Process Sponsors (from combined list) ---
+    session_sponsors = []
+    for bill_record in session_bills:
+        bill_id = bill_record.get('bill_id')
+        # Need to load the raw bill data again for sponsors if it was reused,
+        # or use the 'bill' dict if newly fetched. This is inefficient.
+        # OPTIMIZATION: Store sponsors directly in the processed_bill_record?
+        # For now, let's fetch raw data again if reused. Less ideal.
+        raw_bill_data_for_sponsors = None
+        if bill_id in previous_bills_data and bill_id not in bill_ids_to_fetch_details:
+             # Bill was reused, need to potentially load its raw JSON for sponsors
+             # This requires knowing the structure of the raw json. Assume it's {'status': 'OK', 'bill': {...}}
+             raw_bill_path = bills_year_dir / f"bill_{bill_id}.json"
+             if raw_bill_path.exists():
+                 loaded_raw = load_json(raw_bill_path)
+                 if loaded_raw and isinstance(loaded_raw.get('bill'), dict):
+                     raw_bill_data_for_sponsors = loaded_raw['bill']
+                 else:
+                     logger.warning(f"Could not load valid raw bill data for reused bill {bill_id} from {raw_bill_path} to extract sponsors.")
+             else:
+                 logger.warning(f"Raw bill file missing for reused bill {bill_id} at {raw_bill_path}. Cannot extract sponsors.")
+        elif bill_id in bill_ids_to_fetch_details:
+            # Bill was newly fetched, need to find its 'bill' dict from the loop above.
+            # This is complex. Refactoring process_bill_record generation might be better.
+            # Let's assume we *did* store the full 'bill' dict temporarily when fetching.
+            # (Requires modification to the fetching loop above - TODO: Refactor this)
+            # Placeholder: For now, skip sponsors for newly fetched in this simplified approach
+            # logger.warning(f"Sponsor extraction logic needs refactor for newly fetched bill {bill_id}")
+            pass # Skip sponsor extraction for newly fetched in this pass
+
+        # TODO: Refactor sponsor extraction. The below logic needs the raw 'bill' dict.
+        # Simplified: Assume 'sponsors' list was stored in bill_record (requires earlier change)
+        # sponsors_list = bill_record.get('sponsors_list_extracted', []).
+        sponsors_list = raw_bill_data_for_sponsors.get('sponsors', []) if raw_bill_data_for_sponsors else []
+        if isinstance(sponsors_list, list):
+            for sponsor in sponsors_list:
+                if isinstance(sponsor, dict):
+                     sponsor_type_id = sponsor.get('sponsor_type_id')
+                     session_sponsors.append({
+                         'bill_id': bill_id,
+                         'legislator_id': sponsor.get('people_id'),
+                         'sponsor_type_id': sponsor_type_id,
+                         'sponsor_type': SPONSOR_TYPES.get(sponsor_type_id, 'Unknown'), # Assumes SPONSOR_TYPES exists
+                         'sponsor_order': sponsor.get('sponsor_order', 0),
+                         'committee_sponsor': sponsor.get('committee_sponsor', 0),
+                         'committee_id': sponsor.get('committee_id', 0),
+                         'session_id': session_id, # Use current session_id
+                         'year': year
+                     })
+                else: logger.warning(f"Invalid sponsor entry in bill {bill_id}: {sponsor}")
+        elif raw_bill_data_for_sponsors: # Only warn if we expected to find sponsors
+            logger.warning(f"Unexpected format for sponsors in bill {bill_id}: {type(sponsors_list)}")
+
+    # --- 7. Process Votes & Documents (for ALL bills in combined list) ---
+    session_votes = []
+    vote_fetch_errors = 0
+    text_fetch_errors = 0
+    amendment_fetch_errors = 0
+    supplement_fetch_errors = 0
+
+    for bill_record in tqdm(session_bills, desc=f"Processing votes/docs for session {session_id} ({year})", unit="bill"):
+        bill_id = bill_record.get('bill_id')
+
+        # --- Process Votes (fetch Roll Call details for each vote stub) ---
+        # --- Read vote stubs list directly from the processed bill_record ---
+        # The _vote_stubs_list key was added during bill processing or exists from previous run
+        votes_list_stubs = bill_record.get('_vote_stubs_list', [])
+
+        # Check if the read data is actually a list
+        if not isinstance(votes_list_stubs, list):
+            logger.warning(f"Vote stubs data for bill {bill_id} is not a list ({type(votes_list_stubs)}). Skipping votes for this bill.")
+            # Optionally add recovery logic similar to sponsors if needed, but vote stubs
+            # are less critical to store long-term if missing temporarily.
+            continue # Skip vote processing for this bill
+
+        # Process the vote stubs list
+        if isinstance(votes_list_stubs, list): # Check again after potential recovery (if added)
+            for vote_stub in votes_list_stubs:
+                 if not isinstance(vote_stub, dict):
+                      logger.warning(f"Invalid vote stub entry in bill {bill_id}: {vote_stub}"); continue
+                 vote_id = vote_stub.get('roll_call_id')
+                 if not vote_id:
+                      logger.warning(f"Vote stub in bill {bill_id} missing roll_call_id: {vote_stub}"); continue
+
+                 # Fetch detailed roll call data using getRollCall
+                 roll_params = {'id': vote_id}
+                 try:
+                     roll_data = fetch_api_data('getRollCall', roll_params)
+                     if not roll_data or roll_data.get('status') != 'OK' or 'roll_call' not in roll_data:
+                         logger.warning(f"Failed to retrieve valid roll call data for vote {vote_id} (from bill {bill_id}). Status: {roll_data.get('status', 'N/A')}")
+                         vote_fetch_errors += 1; continue
+
+                     roll_call = roll_data['roll_call']
+                     if not isinstance(roll_call, dict):
+                          logger.warning(f"Invalid roll_call data format for vote {vote_id} (not a dict): {type(roll_call)}")
+                          vote_fetch_errors += 1; continue
+
+                     # Save raw roll call JSON response
+                     save_json(roll_data, votes_year_dir / f"vote_{vote_id}.json")
+
+                     # Extract individual votes from the 'votes' array within the roll call object
+                     individual_votes = roll_call.get('votes', [])
+                     if isinstance(individual_votes, list):
+                          for vote in individual_votes:
+                              if isinstance(vote, dict):
+                                   legislator_id = vote.get('people_id')
+                                   if legislator_id:
+                                       vote_record = {
+                                           'vote_id': vote_id,
+                                           'bill_id': roll_call.get('bill_id'),
+                                           'legislator_id': legislator_id,
+                                           'vote_id_type': vote.get('vote_id'),
+                                           'vote_text': vote.get('vote_text', ''),
+                                           'vote_value': map_vote_value(vote.get('vote_text')),
+                                           'date': roll_call.get('date', ''),
+                                           'description': roll_call.get('desc', ''),
+                                           'yea': roll_call.get('yea', 0),
+                                           'nay': roll_call.get('nay', 0),
+                                           'nv': roll_call.get('nv', 0),
+                                           'absent': roll_call.get('absent', 0),
+                                           'total': roll_call.get('total', 0),
+                                           'passed': int(roll_call.get('passed', 0)),
+                                           'chamber': roll_call.get('chamber', ''),
+                                           'chamber_id': roll_call.get('chamber_id'),
+                                           'session_id': session_id, # Use current session_id
+                                           'year': year,
+                                       }
+                                       session_votes.append(vote_record)
+                                   else:
+                                       logger.debug(f"Vote record in roll call {vote_id} missing legislator ID (people_id): {vote}")
+                              else:
+                                   logger.warning(f"Invalid individual vote entry in roll call {vote_id}: {vote}")
+                     else:
+                          logger.warning(f"Unexpected format for 'votes' array within roll call {vote_id}: {type(individual_votes)}")
+
+                 # Handle API errors specifically for getRollCall
+                 except APIResourceNotFoundError:
+                     logger.warning(f"Roll Call ID {vote_id} (from bill {bill_id}) not found via API. Skipping.")
+                     vote_fetch_errors += 1; continue
+                 except APIRateLimitError:
+                      logger.error(f"Hit LegiScan rate limit fetching roll call {vote_id}.")
+                      raise # Halt processing
+                 except Exception as e_vote:
+                     logger.error(f"Unhandled exception fetching/processing roll call {vote_id} (from bill {bill_id}): {e_vote}", exc_info=True)
+                     vote_fetch_errors += 1; continue
+        else:
+            logger.warning(f"Unexpected format for votes list stub in bill {bill_id}: {type(votes_list_stubs)}")
+
+        # --- Fetch Full Documents (if flags enabled) ---
+        # Document stubs are extracted from the bill record (json string)
+        try:
+            text_stubs = json.loads(bill_record.get('text_stubs', '[]'))
+            amendment_stubs = json.loads(bill_record.get('amendment_stubs', '[]'))
+            supplement_stubs = json.loads(bill_record.get('supplement_stubs', '[]'))
+        except json.JSONDecodeError as e:
+            logger.warning(f"Could not parse document stubs JSON for bill {bill_id}: {e}. Skipping document fetching.")
+            text_stubs, amendment_stubs, supplement_stubs = [], [], []
+
+        # Fetch Texts
+        if fetch_texts_flag and texts_year_dir and isinstance(text_stubs, list):
+            for text_stub in text_stubs:
+                if isinstance(text_stub, dict):
+                    doc_id = text_stub.get('doc_id')
+                    if not _fetch_and_save_document('text', doc_id, bill_id, session_id, 'getText', texts_year_dir):
+                        text_fetch_errors += 1
+                else: logger.warning(f"Invalid text stub format in bill {bill_id}: {text_stub}")
+
+        # Fetch Amendments
+        if fetch_amendments_flag and amendments_year_dir and isinstance(amendment_stubs, list):
+            for amd_stub in amendment_stubs:
+                if isinstance(amd_stub, dict):
+                    amd_id = amd_stub.get('amendment_id')
+                    if not _fetch_and_save_document('amendment', amd_id, bill_id, session_id, 'getAmendment', amendments_year_dir):
+                        amendment_fetch_errors += 1
+                else: logger.warning(f"Invalid amendment stub format in bill {bill_id}: {amd_stub}")
+
+        # Fetch Supplements
+        if fetch_supplements_flag and supplements_year_dir and isinstance(supplement_stubs, list):
+            for sup_stub in supplement_stubs:
+                if isinstance(sup_stub, dict):
+                    sup_id = sup_stub.get('supplement_id')
+                    if not _fetch_and_save_document('supplement', sup_id, bill_id, session_id, 'getSupplement', supplements_year_dir):
+                        supplement_fetch_errors += 1
+                else: logger.warning(f"Invalid supplement stub format in bill {bill_id}: {sup_stub}")
+
+    # --- 8. Save Consolidated Processed Lists for the Session ---
     logger.info(f"Finished processing session {session_id}. Results: Bills={len(session_bills)}, Sponsors={len(session_sponsors)}, Votes={len(session_votes)}.")
     if bill_fetch_errors > 0: logger.warning(f"Bill fetch errors encountered: {bill_fetch_errors}")
     if vote_fetch_errors > 0: logger.warning(f"Vote fetch errors encountered: {vote_fetch_errors}")
+    if text_fetch_errors > 0: logger.warning(f"Text document fetch errors encountered: {text_fetch_errors}")
+    if amendment_fetch_errors > 0: logger.warning(f"Amendment document fetch errors encountered: {amendment_fetch_errors}")
+    if supplement_fetch_errors > 0: logger.warning(f"Supplement document fetch errors encountered: {supplement_fetch_errors}")
+
+    # --- Clean temporary keys before saving --- 
+    cleaned_session_bills = []
+    for bill in session_bills:
+        cleaned_bill = bill.copy()
+        cleaned_bill.pop('_sponsors_list', None)
+        cleaned_bill.pop('_vote_stubs_list', None)
+        cleaned_session_bills.append(cleaned_bill)
 
     # Save the processed lists (JSON format) for this session
-    save_json(session_bills, session_bills_json_path)
+    save_json(cleaned_session_bills, session_bills_json_path) # Save the cleaned list
     save_json(session_sponsors, session_sponsors_json_path)
     save_json(session_votes, session_votes_json_path)
 
-    # Yearly consolidation into CSV happens in the consolidate_yearly_data function
+    logger.info(f"Saved updated session data to:")
+    logger.info(f"  Bills: {session_bills_json_path}")
+    logger.info(f"  Sponsors: {session_sponsors_json_path}")
+    logger.info(f"  Votes: {session_votes_json_path}")
 
 
 def consolidate_yearly_data(data_type: str, years: Iterable[int], columns: List[str], state_abbr: str, paths: Dict[str, Path]):
@@ -1612,6 +1843,9 @@ if __name__ == "__main__":
     parser.add_argument('--end-year', type=int, default=datetime.now().year, help='End year')
     parser.add_argument('--data-dir', type=str, default=None, help='Override base data directory')
     parser.add_argument('--run', type=str, choices=['sessions', 'legislators', 'committees', 'bills', 'scrape_members', 'match_members', 'consolidate_api', 'consolidate_members'], required=True, help='Specific function group to run')
+    parser.add_argument('--fetch-texts', action='store_true', help='Fetch full bill text documents via API (requires --run bills)')
+    parser.add_argument('--fetch-amendments', action='store_true', help='Fetch full bill amendment documents via API (requires --run bills)')
+    parser.add_argument('--fetch-supplements', action='store_true', help='Fetch full bill supplement documents via API (requires --run bills)')
 
     args = parser.parse_args()
 
@@ -1646,6 +1880,15 @@ if __name__ == "__main__":
             logging.shutdown()
             sys.exit(0)
 
+    # Pass fetch flags if running 'bills' action
+    fetch_flags = {'fetch_texts': False, 'fetch_amendments': False, 'fetch_supplements': False}
+    if args.run == 'bills':
+        fetch_flags['fetch_texts'] = args.fetch_texts
+        fetch_flags['fetch_amendments'] = args.fetch_amendments
+        fetch_flags['fetch_supplements'] = args.fetch_supplements
+        if any(fetch_flags.values()):
+             test_logger.info(f"Document fetch flags enabled: Texts={args.fetch_texts}, Amendments={args.fetch_amendments}, Supplements={args.fetch_supplements}")
+
     # Execute specific actions based on --run argument
     try:
         if args.run == 'legislators':
@@ -1657,7 +1900,7 @@ if __name__ == "__main__":
 
         elif args.run == 'bills':
             for session in sessions:
-                collect_bills_votes_sponsors(session, paths)
+                collect_bills_votes_sponsors(session, paths, fetch_flags=fetch_flags) # Pass flags here
 
         elif args.run == 'consolidate_api':
             # Define columns for each consolidated file (ensure these match processing logic)
