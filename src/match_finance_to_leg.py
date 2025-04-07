@@ -8,7 +8,7 @@ import pandas as pd
 from thefuzz import process, fuzz
 from tqdm import tqdm
 
-from src.utils import setup_logging, setup_project_paths
+from src.utils import setup_logging, setup_project_paths, clean_name
 
 # --- Configure Logging ---
 logger = setup_logging('match_finance_to_leg.log')
@@ -22,12 +22,6 @@ COMMITTEE_INDICATORS = [
     'for senate', 'for house', 'for governor', 'for congress', 'election',
     'victory fund', 'leadership pac', 'party', 'caucus'
 ]
-
-# Precompile regex for cleaning names
-NAME_CLEANUP_REGEX = re.compile(
-    r'(senator|rep\.|representative|judge|governor|dr\.|hon\.)\s+|\s+(jr\.|sr\.|iii|ii|iv)$',
-    re.IGNORECASE
-)
 
 def parse_committee_name(committee_name: str) -> Optional[str]:
     """
@@ -78,13 +72,14 @@ def parse_committee_name(committee_name: str) -> Optional[str]:
 
     # Clean up punctuation
     extracted_name = extracted_name.replace(' - ', ' ').replace(':', '').strip(' ,-')
-    cleaned_name = NAME_CLEANUP_REGEX.sub('', extracted_name).strip()
+    cleaned_name_from_util = clean_name(extracted_name)
 
     # Validate the result
-    name_parts = cleaned_name.split()
-    if len(name_parts) >= 2 and len(cleaned_name) > 4 and not cleaned_name.isdigit():
-        logger.debug(f"Parsed '{committee_name}' -> '{cleaned_name}'")
-        return cleaned_name
+    if cleaned_name_from_util:
+        name_parts = cleaned_name_from_util.split()
+        if len(name_parts) >= 2 and len(cleaned_name_from_util) > 4 and not cleaned_name_from_util.isdigit():
+            logger.debug(f"Parsed '{committee_name}' -> '{cleaned_name_from_util}'")
+            return cleaned_name_from_util
     
     return None
 

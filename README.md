@@ -20,13 +20,16 @@ This project starts with Idaho as a case study, with the potential to expand to 
 *   **Automated Data Collection:**
     *   Retrieves comprehensive legislative data (sessions, legislators, bills, votes, sponsors, committees) via the **LegiScan API**.
     *   Scrapes **Idaho Legislature website** for current committee memberships.
-    *   (In Progress/Needs Validation) Scrapes **Idaho SOS Sunshine Portal** for campaign finance contribution/expenditure data.
+    *   **Scrapes Idaho SOS Sunshine Portal** for campaign finance contribution/expenditure data:
+        *   Uses **Playwright** for robust browser automation to handle dynamic JavaScript-heavy website.
+        *   Includes validation scripts (`test_finance_scraper.py`, etc.) to test and refine scraping functionality against the live site.
     *   (Planned) Collects **US Census ACS data** for district demographics.
     *   (Planned) Parses **Idaho election results** for historical performance.
 *   **Robust Data Processing:**
     *   Handles API rate limits and errors gracefully (`tenacity`).
     *   Performs fuzzy matching (`thefuzz`) to link scraped/finance data to official legislator IDs.
     *   Consolidates data from different sources and time periods into structured formats (JSON, CSV).
+    *   Centralized utility functions (`src/utils.py`) for common tasks like name cleaning.
 *   **Vote Prediction Modeling:**
     *   (Planned) Prepares data and engineers features relevant to voting behavior.
     *   (Planned) Trains and tunes an XGBoost model for predicting Yea/Nay votes.
@@ -38,9 +41,10 @@ This project starts with Idaho as a case study, with the potential to expand to 
 
 *   **Backend / Data Processing:** Python 3.x
 *   **Core Libraries:**
-    *   `requests`: HTTP requests for API calls and scraping.
+    *   `requests`: HTTP requests for API calls.
+    *   `playwright`: Browser automation for robust scraping of dynamic websites.
     *   `pandas`: Data manipulation and analysis.
-    *   `beautifulsoup4`: HTML parsing for web scraping.
+    *   `beautifulsoup4`: HTML parsing (used minimally where JS rendering isn't needed).
     *   `tenacity`: Retrying logic for API calls/web requests.
     *   `thefuzz` (with `python-Levenshtein`): Fuzzy string matching.
     *   `tqdm`: Progress bars.
@@ -61,53 +65,59 @@ This project starts with Idaho as a case study, with the potential to expand to 
 ## Project Structure
 
 ```
-├── data/ # Data directory (generated, not in git usually)
-│ ├── artifacts/ # Debugging outputs, monitoring HTML
-│ ├── logs/ # Log files
-│ ├── processed/ # Processed & consolidated CSV/JSON data
-│ └── raw/ # Raw data fetched from sources (JSON, HTML, CSV)
-│ ├── bills/
-│ ├── campaign_finance/
-│ ├── committee_memberships/
-│ ├── committees/
-│ ├── legislators/
-│ ├── sponsors/
-│ └── votes/
-├── docs/ # Documentation files (planned)
+├── data/
+│ ├── artifacts/
+│ │ └── debug/ # Playwright HTML snapshots for debugging scrapers
+│ ├── logs/
+│ ├── processed/
+│ └── raw/
+│   ├── bills/
+│   ├── campaign_finance/
+│   ├── committee_memberships/
+│   ├── committees/
+│   ├── legislators/
+│   ├── sponsors/
+│   └── votes/
+├── docs/
 │ ├── data_schema.md
-│ └── feature_engineering.md
-├── notebooks/ # Jupyter notebooks for exploration, EDA (optional)
-├── src/ # Source code
-│ ├── init.py
-│ ├── config.py # Configuration settings, API keys (via .env)
-│ ├── data_collection.py # LegiScan API collection, ID committee scraping/matching
-│ ├── main.py # Main execution script orchestrator
-│ ├── match_finance_to_leg.py# Matches scraped finance data to legislators
-│ ├── monitor_idaho_structure.py # Checks for website structure changes
-│ ├── scrape_finance_idaho.py# Scrapes Idaho campaign finance portal (needs validation)
-│ ├── utils.py # Common utility functions (logging, file I/O, fetch)
-│ ├── data_preprocessing.py # (Planned) Data cleaning, merging, feature engineering
-│ ├── xgboost_model.py # (Planned) Model training, tuning, evaluation
+│ ├── feature_engineering.md
+│ ├── README_VALIDATION.md
+│ └── todo.md # Detailed task tracking
+├── notebooks/
+├── src/
+│ ├── __init__.py
+│ ├── config.py
+│ ├── data_collection.py
+│ ├── main.py
+│ ├── match_finance_to_leg.py
+│ ├── monitor_idaho_structure.py
+│ ├── scrape_finance_idaho.py # Scrapes Idaho finance portal (Uses Playwright)
+│ ├── test_finance_scraper.py # Playwright-based validation for finance scraper
+│ ├── validate_csv_parsing.py
+│ ├── validate_link_finding.py
+│ ├── utils.py # Common utilities (logging, name cleaning, etc.)
+│ ├── data_preprocessing.py # (Planned)
+│ ├── xgboost_model.py # (Planned)
 │ └── ... (Planned: api/, frontend/, chatbot/ modules)
 ├── tests/ # Unit and integration tests (planned)
-├── .env.example # Example environment file structure
+├── venv/ # Python virtual environment (add to .gitignore)
+├── .env.example
 ├── .gitignore
+├── CHANGELOG.md # Project change history
 ├── LICENSE
 ├── README.md # This file
-├── requirements.txt # Project dependencies
-└── TODO.md # Detailed task tracking
+└── requirements.txt
 ```
-
 
 ## Data Sources
 
 *   **LegiScan API:** Provides core legislative data (bills, votes, legislators, etc.). Requires an API key. ([api.legiscan.com](https://api.legiscan.com/))
 *   **Idaho Legislature Website:** Source for current committee memberships. Structure is subject to change, requiring scraper maintenance. ([legislature.idaho.gov](https://legislature.idaho.gov/))
-*   **Idaho SOS Sunshine Portal:** Source for campaign finance data. Scraping relies on potentially brittle form interactions and download link structures. ([sunshine.sos.idaho.gov](https://sunshine.sos.idaho.gov/))
+*   **Idaho SOS Sunshine Portal:** Source for campaign finance data. Relies on Playwright browser automation due to dynamic JavaScript interface. Structure is subject to change. ([sunshine.sos.idaho.gov](https://sunshine.sos.idaho.gov/))
 *   **(Planned) US Census Bureau:** American Community Survey (ACS) 5-Year Estimates for district demographics. Requires identifying correct tables and vintages. TIGER/Line shapefiles for district boundaries.
 *   **(Planned) Idaho Secretary of State / voteidaho.gov:** Historical election results. Format varies (PDF, CSV, Excel).
 
-*Disclaimer:* Web scraping is dependent on the target website's structure. Changes to these websites (especially the Idaho Legislature site and Sunshine Portal) **will likely break the scrapers** and require code updates. The `monitor_idaho_structure.py` script can help detect some changes.
+*Disclaimer:* Web scraping, especially of dynamic sites like the Sunshine Portal, is inherently brittle. Changes to these websites **will likely break the scrapers** and require code updates. The use of Playwright helps manage JavaScript, but structural changes still require maintenance.
 
 ## Setup & Installation
 
@@ -117,19 +127,25 @@ This project starts with Idaho as a case study, with the potential to expand to 
     cd valley-vote
     ```
 
-2.  **Create and Activate a Virtual Environment (Recommended):**
+2.  **Create and Activate a Virtual Environment (HIGHLY Recommended):**
     ```bash
-    python -m venv venv
+    python3 -m venv venv  # Use python3 or python depending on your system
     source venv/bin/activate  # On Windows use `venv\Scripts\activate`
     ```
+    *Using a virtual environment prevents conflicts with system packages and is required for reliable dependency management (due to PEP 668).* 
 
 3.  **Install Dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
-    *Note:* If `python-Levenshtein` fails on install (common issue needing C++ build tools), you might try `pip install fuzzywuzzy` first, and then `pip install python-Levenshtein` or `pip install thefuzz[speedup]`. Consult platform-specific instructions if needed.
 
-4.  **Set Up Environment Variables:**
+4.  **Install Playwright Browsers:** Playwright needs browser binaries.
+    ```bash
+    playwright install --with-deps 
+    ```
+    *This downloads necessary browser binaries (Chromium by default) and installs OS-level dependencies. May require `sudo` on Linux for the dependencies.*
+
+5.  **Set Up Environment Variables:**
     *   Copy `.env.example` to `.env`:
         ```bash
         cp .env.example .env
@@ -138,18 +154,18 @@ This project starts with Idaho as a case study, with the potential to expand to 
         ```
         LEGISCAN_API_KEY=YOUR_ACTUAL_LEGISCAN_API_KEY
         ```
-    *   The application loads this file automatically using `python-dotenv`. **Do not commit your `.env` file to Git.**
+    *   The application loads this file automatically using `python-dotenv`. **Do not commit your `.env` file to Git.** Add `venv/` and `.env` to your `.gitignore` file if not already present.
 
 ## Usage
 
-The primary way to run data collection and processing tasks is via `main.py`. However, individual scripts can also be run for specific tasks or testing.
+The primary way to run data collection and processing tasks is via `main.py`. However, individual scripts can also be run for specific tasks or testing. **Remember to activate the virtual environment (`source venv/bin/activate`) before running scripts.**
 
 **Using `main.py` (Recommended Orchestrator):**
 
 The `main.py` script orchestrates the common data collection workflow.
 
 ```bash
-python src/main.py --state ID --start-year 2022 --end-year 2023 --data-dir ./my_data
+python -m src.main --state ID --start-year 2022 --end-year 2023 --data-dir ./my_data
 --state: Specify the state abbreviation (default: ID).
 --start-year, --end-year: Define the range of legislative years to process.
 --data-dir: (Optional) Override the default ./data directory.
@@ -159,63 +175,58 @@ python src/main.py --state ID --start-year 2022 --end-year 2023 --data-dir ./my_
 --monitor-only: Run only the website structure monitor (monitor_idaho_structure.py) and exit.
 ```
 
-Running Individual Modules (for testing/specific tasks):
-You can run modules directly using python -m src.<module_name>. Refer to the --help argument for each script for specific options.
+**Running Individual Modules (for testing/specific tasks):**
+You can run modules directly using `python -m src.<module_name>`. Refer to the `--help` argument for each script for specific options.
 
-## LegiScan Collection & Committee Scraping/Matching: ##
+**Finance Scraping & Validation (Using Playwright):**
 
+```bash
+# Basic scraping (NOTE: Still under development/validation)
+# python -m src.scrape_finance_idaho --start-year 2023 --end-year 2023
+
+# Validate search form elements using Playwright
+python -m src.test_finance_scraper --inspect-form
+
+# Validate search submission and results page structure using Playwright
+python -m src.test_finance_scraper --inspect-results
+
+# Run predefined search test cases (if implemented in test_finance_scraper)
+# python -m src.test_finance_scraper --test-search
+
+# Validate CSV parsing (after obtaining a CSV)
+# python -m src.validate_csv_parsing path/to/file.csv --data-type contributions --suggest-mapping
+
+# Validate link finding (if applicable separate from full search)
+# python -m src.validate_link_finding --name "John Smith" --year 2022 --data-type contributions
 ```
+
+**Other Modules (LegiScan, Matching, Monitoring):**
+
+Usage remains similar, run with `python -m src.<module_name> --help` for options.
+
+```bash
+# LegiScan Collection & Committee Scraping/Matching:
 python -m src.data_collection --state ID --start-year 2023 --end-year 2023 --run bills
 python -m src.data_collection --state ID --run scrape_members
 python -m src.data_collection --state ID --run match_members
 See `data_collection.py --help` for all `--run` options
 ```
 
-## Finance Scraping: ##
+## (Planned) Preprocessing & Modeling:
 
-```
-python -m src.scrape_finance_idaho --start-year 2023 --end-year 2023
-```
+Usage instructions will be added once `data_preprocessing.py` and `xgboost_model.py` are implemented.
 
-## Finance Matching: ##
+## Current Status & Roadmap
 
-```
-# Ensure finance_*.csv and legislators_*.csv exist in processed/
-python -m src.match_finance_to_leg data/processed/finance_idaho_consolidated_....csv data/processed/legislators_ID.csv data/processed/finance_idaho_matched_....csv
-```
+The project is currently focused on validating and refining the **Idaho campaign finance scraper** using Playwright.
 
-## Website Monitoring ##
+*   **Completed:** Core LegiScan API integration, Idaho committee membership scraping/matching, basic project structure, virtual environment setup, initial Playwright integration for finance scraper testing.
+*   **In Progress:** Refining Playwright scripts (`test_finance_scraper.py`) to reliably interact with the Idaho SOS Sunshine Portal search form and results page. Identifying the Export button selector is the immediate next step.
+*   **Planned:** Completing finance scraper validation, collecting other data sources (demographics, elections), data preprocessing/feature engineering, model development, platform/chatbot development.
 
-```
-python -m src.monitor_idaho_structure
-```
+For a detailed breakdown of pending tasks, see `docs/todo.md` and `CHANGELOG.md`.
 
-## (Planned) Preprocessing & Modeling: ##
-
-Usage instructions will be added once data_preprocessing.py and xgboost_model.py are implemented.
-
-### Current Status & Roadmap ###
-
-The project is currently in the data collection and initial processing phase.
-
-## Completed: ## Core LegiScan API integration, Idaho committee membership scraping and basic matching. Basic project structure and utilities.
-
-## In Progress / Needs Validation: ## Idaho campaign finance scraping and matching (requires significant validation and potential refinement due to website fragility).
-
-## Planned: ##
-```
-Demographics and Election History data collection.
-Data preprocessing and robust feature engineering.
-Predictive model (XGBoost) development, training, and interpretation.
-Development of backend API and database.
-Frontend UI for data exploration and visualization.
-Chatbot integration.
-Comprehensive testing and documentation.
-Deployment strategy and implementation.
-For a detailed breakdown of pending tasks, see the TODO.md file.
-```
-
-## Contributing ##
+## Contributing
 
 Contributions are welcome! Please feel free to open an issue to report bugs, suggest features, or discuss potential improvements. If you'd like to contribute code, please open an issue first to discuss the change and then submit a pull request.
 

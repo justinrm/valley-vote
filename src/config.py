@@ -37,7 +37,6 @@ ID_MIN_EXPECTED_HEADINGS = 5 # For monitoring page structure
 # Idaho Finance Scraping (Specific to ID)
 ID_FINANCE_BASE_URL = 'https://sunshine.sos.idaho.gov/'
 # Verify this path remains correct by inspecting the website's network traffic during a search
-ID_FINANCE_SEARCH_PATH = 'Campaign/Search'
 ID_FINANCE_DOWNLOAD_WAIT_SECONDS = 1.5 # Wait between finance download attempts
 
 # Fuzzy Matching Thresholds (0-100)

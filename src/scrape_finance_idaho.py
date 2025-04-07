@@ -36,7 +36,6 @@ from tqdm import tqdm
 # Local imports
 from .config import (
     ID_FINANCE_BASE_URL,
-    ID_FINANCE_SEARCH_PATH,
     ID_FINANCE_DOWNLOAD_WAIT_SECONDS,
     FINANCE_SCRAPE_LOG_FILE,
     FINANCE_COMMITTEE_INDICATORS
@@ -269,7 +268,8 @@ def search_for_finance_data_link(
     Returns:
         Absolute URL string for the download link, or None if not found or error.
     """
-    search_page_url = urljoin(ID_FINANCE_BASE_URL, ID_FINANCE_SEARCH_PATH)
+    # Use only the base URL as the search page entry point
+    search_page_url = ID_FINANCE_BASE_URL 
     logger.info(f"Initiating finance search: Term='{search_term}', Year={year}, Type={data_type}, URL={search_page_url}")
 
     # Use a session object to handle cookies potentially set by the server

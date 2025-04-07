@@ -7,6 +7,7 @@ import logging
 import sys
 import random
 import time
+import re # <-- Add import for regular expressions
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
 import io # For string/bytes IO
@@ -162,6 +163,31 @@ def convert_to_csv(data: List[Dict[str, Any]], csv_path: Path, columns: Optional
         num_saved = 0  # Indicate failure
 
     return num_saved
+
+# --- String/Text Utilities ---
+
+# Precompile regex for cleaning names (moved from match_finance_to_leg.py)
+NAME_CLEANUP_REGEX = re.compile(
+    r'(senator|rep\.|representative|judge|governor|dr\.|hon\.)\s+|\s+(jr\.|sr\.|iii|ii|iv)$',
+    re.IGNORECASE
+)
+
+def clean_name(name: Optional[str]) -> Optional[str]:
+    """Cleans common titles and suffixes from a person's name string."""
+    if not name or pd.isna(name):
+        return None
+    try:
+        # Ensure it's a string before applying regex
+        name_str = str(name)
+        cleaned = NAME_CLEANUP_REGEX.sub('', name_str).strip()
+        # Additional whitespace cleanup
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        return cleaned if cleaned else None # Return None if cleaning results in empty string
+    except Exception as e:
+        # Log error if cleaning fails unexpectedly
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Could not clean name '{name}': {e}")
+        return str(name) # Return original string on error
 
 # --- Network Operations ---
 DEFAULT_HEADERS = {

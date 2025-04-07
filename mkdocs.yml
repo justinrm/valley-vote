@@ -1,6 +1,6 @@
 site_name: Valley Vote Documentation
 site_description: Documentation for the Valley Vote legislative data collection and analysis platform
-repo_url: https://github.com/yourusername/valley-vote
+repo_url: https://github.com/justinrm/valley-vote
 repo_name: valley-vote
 
 theme:

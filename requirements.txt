@@ -10,6 +10,10 @@ tqdm>=4.61.0              # Progress bars for loops
 beautifulsoup4>=4.9.3    # HTML parsing for web scraping
 fuzzywuzzy~=0.18.0        # Fuzzy string matching (e.g., legislator names)
 python-Levenshtein>=0.12.2 # Performance enhancement for fuzzywuzzy (requires C build tools)
+python-dotenv
+thefuzz[speedup]
+# Add Playwright for browser automation
+playwright
 
 # --- Data Processing & Feature Engineering (Includes Core & Planned) ---
 numpy~=1.26.4             # Numerical operations (dependency of pandas, good to pin)

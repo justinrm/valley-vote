@@ -29,158 +29,134 @@ This document tracks the tasks required to build and improve the Valley Vote pla
     -   [x] Implement consolidation of yearly matched membership data.
     -   [~] **Monitor & Maintain:** Regularly check Idaho Legislature website structure and update scraper (`monitor_idaho_structure.py`). Needs automated checks or scheduled runs.
 
--   **Idaho Campaign Finance Data (`scrape_finance_idaho.py` & `match_finance_to_leg.py`):**
-    -   [~] **Develop Scraper/Collector (`scrape_finance_idaho.py`):** Target Idaho SOS Sunshine Portal.
-        -   [~] Implement basic session handling, page fetching, retry logic (`fetch_page`, `requests.Session`).
-        -   [~] Implement candidate search functionality (form field names `ctl00$...` are brittle and **need verification/updates**).
-        -   [ ] **Validate & Refine Search:** Test search against actual portal behavior for various legislators/committees/years. Adjust form data payload as needed.
-        -   [~] Implement logic to find download links (prioritizes CSV `<a>` tags, **needs validation** against actual results page structure). Handle cases where only buttons or JS triggers exist (currently not supported).
-        -   [ ] **Validate & Refine Link Finding:** Test link extraction on real search results.
-        -   [~] Implement CSV download and basic parsing (`pandas`, error handling, encoding checks - **needs testing with real data**).
-        -   [ ] **Refine CSV Parsing:** Standardize column mapping (`CONTRIBUTION_COLUMN_MAP`, `EXPENDITURE_COLUMN_MAP`), improve data cleaning (amounts, dates), type conversion based on actual Idaho CSV format. Handle potential Excel files if CSV fails.
-        -   [ ] Implement basic HTML table parsing fallback if CSV download is unreliable (requires significant effort).
-        -   [x] Implement saving of raw downloaded files (CSV/Raw).
-        -   [x] Implement saving of processed contributions/expenditures to a consolidated yearly CSV.
+-   **Idaho Campaign Finance Data (`scrape_finance_idaho.py` & related):**
+    -   [x] **Initial Setup:**
+        -   [x] Added Playwright dependency (`requirements.txt`).
+        -   [x] Set up virtual environment (`venv`).
+        -   [x] Created basic finance scraper structure (`scrape_finance_idaho.py`).
+        -   [x] Created validation/test script (`test_finance_scraper.py`).
+    -   [~] **Refactor & Validate Scraper (`test_finance_scraper.py`, `scrape_finance_idaho.py`):** Use Playwright for Sunshine Portal interaction.
+        -   [x] Refactor `--inspect-form` to use Playwright, identify initial elements.
+        -   [x] Refactor `--inspect-results` to use Playwright.
+            -   [x] Implement robust selector for name/committee input (`#panel-campaigns-content input[role="combobox"]...`).
+            -   [x] Implement focus logic for hidden input (`.focus()` with JS fallback).
+            -   [x] Implement typing/filling name input.
+            -   [ ] (Minor) Handle dropdown option selection gracefully (currently skips if not found).
+            -   [x] Implement locating and filling date inputs.
+            -   [x] Implement locating and clicking search button.
+            -   [x] Implement waiting for/detecting results area.
+            -   [x] Implement finding results items count.
+            -   [~] **Implement Finding Export Link/Button:** Timeout currently occurs. **(Next Step)**
+        -   [ ] Implement `--test-search` function using validated Playwright logic.
+        -   [ ] Refactor `scrape_finance_idaho.py` main scraping loop to use the validated Playwright interaction logic from `test_finance_scraper.py`.
+        -   [ ] Implement robust error handling and retry logic within Playwright interactions.
+    -   [~] **Refine CSV Parsing (`validate_csv_parsing.py`, `scrape_finance_idaho.py`):** Standardize column mapping (`FINANCE_COLUMN_MAPS` in `data_collection.py`), improve data cleaning (amounts, dates), type conversion based on actual Idaho CSV format. Handle potential Excel files if CSV fails.
     -   [~] **Develop Robust Matching (`match_finance_to_leg.py`):**
-        -   [~] Initial fuzzy matching logic implemented (`thefuzz`).
-        -   [ ] **Refine Strategy:** Improve matching beyond simple name fuzziness. Consider:
-            -   Using committee indicators (`config.FINANCE_COMMITTEE_INDICATORS`).
-            -   Linking via election year/office sought if available in finance data.
-            -   Rule-based matching for common name variations or committee naming patterns.
-            -   Potential manual review/override mechanism for ambiguous matches.
-        -   [ ] **Validate Matches:** Perform spot-checks and potentially build a validation set to assess matching accuracy.
+        -   [x] Initial fuzzy matching logic implemented (`thefuzz`).
+        -   [x] Centralized `clean_name` utility in `src/utils.py`.
+        -   [ ] **Refine Strategy:** Improve matching beyond simple name fuzziness (consider committee indicators, election year/office, rules, manual review).
+        -   [ ] **Validate Matches:** Perform spot-checks/build validation set.
     -   [ ] Extract and standardize donor details (name, address, employer, occupation) for categorization/analysis.
     -   [ ] (Optional) Extract and standardize expenditure data more thoroughly.
 
 -   **District Demographics Data (`process_demographics_idaho.py` - Planned Script):**
-    -   [ ] **Identify Data Sources:** Pinpoint specific Census ACS tables (e.g., B19013 income, DP05 race/age) and TIGER/Line shapefiles for *relevant* Idaho legislative district boundaries and years.
-    -   [ ] **Implement Data Download:** Automate fetching Census data (API or file download) and TIGER files.
-    -   [ ] **Implement Geospatial Processing (`geopandas`):**
-        -   [ ] Load district shapefiles.
-        -   [ ] Load Census data (handle structure, potentially requires `censusdata` package).
-        -   [ ] Perform spatial join between Census geographies (block groups/tracts) and legislative districts.
-    -   [ ] **Implement Data Aggregation:** Calculate weighted demographic variables per district. Handle boundary mismatches/interpolation carefully.
-    -   [ ] **Establish Linking:** Ensure a clear, consistent key (`district_id`, `geoid`) to link demographics to legislator records.
-    -   [ ] **Save Processed Data:** Output CSV mapping district identifier to demographic features.
+    -   [ ] **Identify Data Sources:** Pinpoint specific Census ACS tables and TIGER/Line shapefiles for relevant ID legislative districts/years.
+    -   [ ] **Implement Data Download:** Automate fetching Census data and TIGER files.
+    -   [ ] **Implement Geospatial Processing (`geopandas`):** Load shapefiles, load Census data, perform spatial join, aggregate demographics per district.
+    -   [ ] **Establish Linking:** Ensure consistent key (`district_id`, `geoid`).
+    -   [ ] **Save Processed Data:** Output CSV mapping district identifier to features.
 
 -   **Election History Data (`parse_elections_idaho.py` - Planned Script):**
-    -   [ ] **Identify Data Sources:** Locate official historical election results for Idaho state legislative races (likely `voteidaho.gov` or SOS archives). Determine file formats (PDF, Excel, CSV).
-    -   [ ] **Implement Data Download/Access:** Obtain result files (manual download initially, automate if possible).
-    -   [ ] **Implement Parsing Logic:** Develop robust parsers for identified file formats (PDF parsing can be complex). Extract candidate, party, district, year, votes, total votes.
-    -   [ ] **Calculate Metrics:** Compute margin of victory, vote share, district competitiveness.
-    -   [ ] **Develop Robust Matching:** Create strategy to match election candidates (name, district, year) to LegiScan `legislator_id`. Handle name variations, incumbency status.
-    -   [ ] **Save Processed Data:** Output CSV containing historical election performance linked to `legislator_id`.
+    -   [ ] **Identify Data Sources:** Locate official historical election results for ID legislature (PDF, Excel, CSV?).
+    -   [ ] **Implement Data Download/Access:** Obtain result files.
+    -   [ ] **Implement Parsing Logic:** Develop robust parsers. Extract candidate, party, district, year, votes.
+    -   [ ] **Calculate Metrics:** Margin of victory, vote share, competitiveness.
+    -   [ ] **Develop Robust Matching:** Match election candidates to LegiScan `legislator_id`.
+    -   [ ] **Save Processed Data:** Output CSV linked to `legislator_id`.
 
 -   **General Acquisition Improvements:**
-    -   [ ] Implement caching for API calls and web requests (`requests-cache`) to speed up runs and reduce load on sources.
-    -   [ ] Add configuration options for state-specific parameters (URLs, selectors) to facilitate expansion beyond Idaho.
+    -   [ ] Implement caching for API calls and web requests (`requests-cache`).
+    -   [ ] Add configuration options for state-specific parameters to facilitate expansion.
 
 ## Phase 2: Data Preprocessing & Feature Engineering
 
 *Consolidating, cleaning, merging data, and creating predictive features. Requires `data_preprocessing.py` (Planned Script).*
 
--   [ ] **Create `data_preprocessing.py` script:** Establish the central script.
--   [ ] **Implement Master Data Loading:** Load all relevant processed CSVs from Phase 1. Ensure consistent types (`legislator_id`, dates). Handle potential file-not-found errors gracefully.
--   [ ] **Implement Robust Data Linking & Merging:**
-    -   [ ] **Finalize & Apply Matching:** Integrate validated finance and election history matching logic.
-    -   [ ] **Verify Keys:** Ensure consistent keys (`legislator_id`, `bill_id`, `vote_id`, `district_id`) across datasets.
-    -   [ ] **Join Logically:** Merge datasets (votes -> bills, votes -> legislators, legislators -> districts -> demographics/elections/finance). Handle potential one-to-many or many-to-many relationships carefully.
--   [ ] **Implement Data Cleaning & Preparation:**
-    -   [ ] Handle missing values strategically (imputation, removal, flag creation).
-    -   [ ] Standardize data formats (dates, text, categories).
-    -   [ ] Filter votes: Define criteria for votes to model (e.g., Yea/Nay only, exclude procedural, handle absences).
-    -   [ ] Address inconsistencies identified during EDA (perform EDA!).
--   [ ] **Implement Feature Engineering:**
-    -   [ ] **Legislator Features:** Seniority, Party, Role, District Link, **Influence Score** (define: e.g., sponsorship success, committee leadership), Past Voting Behavior (lagged votes, party loyalty score).
-    -   [ ] **Bill Features:** Subject(s) (TF-IDF, embeddings, or one-hot), Type, Origin Chamber, Status/Progress, Complexity (text length, amendments), Sponsor Info (count, primary sponsor party/influence).
-    -   [ ] **Committee Features:** Legislator Assignments (one-hot/multi-hot), Committee Influence (e.g., Appropriations), Bill's Committee.
-    -   [ ] **External Context Features:** District Demographics, Campaign Finance (total $, industry $, PAC $ related to bill subject), Election History (margin of victory, competitiveness), Session Effects (election year).
-    -   [ ] **Interaction Features:** Consider interactions (e.g., legislator party * sponsor party).
--   [ ] **Generate Final Feature Matrix:** Create the dataset (`voting_data.csv` or similar) with target variable (`vote_value` 0/1) and features. Ensure proper indexing.
+-   [ ] **Create `data_preprocessing.py` script.**
+-   [ ] **Implement Master Data Loading:** Load all relevant processed CSVs.
+-   [ ] **Implement Robust Data Linking & Merging:** Finalize/apply matching, verify keys, join logically.
+-   [ ] **Implement Data Cleaning & Preparation:** Handle missing values, standardize formats, filter votes, address inconsistencies.
+-   [ ] **Implement Feature Engineering:** Legislator features (seniority, party, influence, etc.), Bill features (subject, complexity, etc.), Committee features, External Context (Demographics, Finance, Elections), Interaction features.
+-   [ ] **Generate Final Feature Matrix:** Create dataset (`voting_data.csv`) with target and features.
 
 ## Phase 3: Predictive Modeling (XGBoost Focus)
 
 *Building, training, tuning, and interpreting the vote prediction model. Requires `xgboost_model.py` (Planned Script).*
 
 -   [ ] **Create `xgboost_model.py` script** (or notebook).
--   [ ] Load feature matrix from Phase 2.
--   [ ] **Implement Data Splitting:** Define robust strategy (e.g., time-based split by session, potentially `GroupKFold` by legislator or bill to prevent leakage). Create train/validation/test sets.
--   [ ] **Handle Features for XGBoost:** One-Hot Encode categoricals, potentially scale numericals (less critical for trees).
--   [ ] **Implement XGBoost Model Training:** Instantiate `XGBClassifier`, train on training set (`.fit()`).
--   [ ] **Perform Hyperparameter Tuning:** Use `GridSearchCV`, `RandomizedSearchCV`, or `Optuna` with appropriate cross-validation (e.g., `GroupTimeSeriesSplit`) on the training set. Tune key parameters (`n_estimators`, `max_depth`, `learning_rate`, etc.). Define scoring metric (ROC-AUC, F1).
--   [ ] **Save Trained Model:** Persist the best model artifact (`joblib`, `pickle`, XGBoost save).
--   [ ] **Implement Feature Importance Analysis:** Analyze XGBoost `feature_importances_` and **SHAP** values (global and local) for interpretability.
--   [ ] (Optional) Train baseline models (Logistic Regression, Party-Based Dummy) for comparison.
--   [ ] (Optional) Experiment with other models (LightGBM, CatBoost, etc.).
+-   [ ] Load feature matrix.
+-   [ ] **Implement Data Splitting:** Time-based, `GroupKFold`, etc.
+-   [ ] **Handle Features for XGBoost:** Encoding, scaling (if needed).
+-   [ ] **Implement XGBoost Model Training:** `.fit()`.
+-   [ ] **Perform Hyperparameter Tuning:** `GridSearchCV`/`RandomizedSearchCV`/`Optuna` with CV.
+-   [ ] **Save Trained Model:** Persist artifact.
+-   [ ] **Implement Feature Importance Analysis:** XGBoost `feature_importances_`, **SHAP** values.
+-   [ ] (Optional) Train baseline models.
+-   [ ] (Optional) Experiment with other models.
 
 ## Phase 4: Model Evaluation & Basic Deployment Prep
 
 *Assessing model performance and preparing for potential use.*
 
--   [ ] **Implement Model Evaluation:** Evaluate final model on the **hold-out test set**. Calculate Accuracy, Precision, Recall, F1, ROC-AUC, Confusion Matrix. Analyze performance across subgroups (party, chamber). Plot ROC/PR curves.
--   [ ] **Refine Cross-Validation:** Double-check CV strategy used during tuning for soundness.
--   [ ] **Interpret Results:** Analyze metrics and SHAP values to understand model behavior, strengths, weaknesses, biases.
--   [ ] (Recommended) Set up experiment tracking (MLflow, Weights & Biases) to log runs, parameters, metrics, artifacts.
--   [ ] **Design Model Retraining Strategy:** Plan for retraining (e.g., after each session) and monitoring for performance drift.
--   [ ] (Optional/Initial) Develop basic prediction function/script: Load model, accept input features (e.g., bill details, legislator ID), output prediction probability.
+-   [ ] **Implement Model Evaluation:** Evaluate on test set (Accuracy, Precision, Recall, F1, ROC-AUC, Confusion Matrix). Analyze subgroups. Plot curves.
+-   [ ] **Refine Cross-Validation:** Verify CV strategy.
+-   [ ] **Interpret Results:** Analyze metrics and SHAP.
+-   [ ] (Recommended) Set up experiment tracking (MLflow, W&B).
+-   [ ] **Design Model Retraining Strategy:** Plan for updates.
+-   [ ] (Optional/Initial) Develop basic prediction function.
 
 ## Phase 5: Backend API & Data Serving
 
 *Building the infrastructure to serve data and model predictions for the platform.*
 
--   [ ] **Design Database Schema:** Choose database (e.g., PostgreSQL, SQLite for simpler cases). Design tables for legislators, bills, votes, committees, finance data, demographics, election results, potentially users. Optimize for query performance.
--   [ ] **Implement Data Loading Pipeline:** Create scripts/workflows to load processed data from CSVs/JSONs (Phases 1 & 2) into the database. Handle updates and idempotency.
--   [ ] **Develop Backend API:** Choose framework (e.g., Flask, FastAPI).
-    -   [ ] Implement endpoints to serve structured data (e.g., legislator profiles, bill details, voting records).
-    -   [ ] Implement endpoint(s) for model predictions (integrating prediction function from Phase 4).
-    -   [ ] Implement endpoints for aggregated data needed for visualizations.
-    -   [ ] Implement basic authentication/authorization if needed.
-    -   [ ] Add API documentation (e.g., Swagger/OpenAPI).
+-   [ ] **Design Database Schema:** Choose DB, design tables.
+-   [ ] **Implement Data Loading Pipeline:** Scripts to load processed data into DB.
+-   [ ] **Develop Backend API:** Choose framework (Flask/FastAPI). Implement endpoints for data, predictions, aggregations. Add docs.
 
 ## Phase 6: Frontend Development & Visualization
 
 *Building the user interface for data exploration and interaction.*
 
--   [ ] **Choose Frontend Framework:** Select framework (e.g., React, Vue, Streamlit for rapid prototyping).
--   [ ] **Design User Interface:** Plan layout, navigation, and components for displaying legislator info, bill details, vote outcomes, finance summaries, etc.
--   [ ] **Implement UI Components:** Build reusable frontend components.
--   [ ] **Integrate with Backend API:** Connect frontend to fetch data from API endpoints.
--   [ ] **Implement Data Visualizations:** Choose library (e.g., D3.js, Plotly, Chart.js). Create visualizations for:
-    -   [ ] Legislator voting patterns (e.g., party loyalty over time).
-    -   [ ] Bill progression and outcomes.
-    -   [ ] Campaign finance summaries (contributions by source/industry).
-    -   [ ] District demographics maps/charts.
-    -   [ ] Model prediction explanations (potentially using SHAP plots).
--   [ ] Ensure responsive design for different screen sizes.
+-   [ ] **Choose Frontend Framework:** React/Vue/Streamlit.
+-   [ ] **Design User Interface:** Layout, navigation, components.
+-   [ ] **Implement UI Components.**
+-   [ ] **Integrate with Backend API.**
+-   [ ] **Implement Data Visualizations:** D3/Plotly/Chart.js. Voting patterns, bill outcomes, finance, demographics, SHAP plots.
+-   [ ] Ensure responsive design.
 
 ## Phase 7: Chatbot Integration
 
 *Adding conversational AI capabilities to query and understand the data.*
 
--   [ ] **Select Language Model (LLM):** Choose appropriate model (e.g., GPT-4, Claude, Llama) considering cost, performance, and fine-tuning capabilities.
--   [ ] **Design Chatbot Interaction Flow:** Define how users interact, what types of questions it should handle.
--   [ ] **Develop Prompt Engineering Strategy:** Craft effective prompts to guide the LLM in querying data and synthesizing answers based on user questions.
--   [ ] **Implement Backend Chat Logic:**
-    -   [ ] Integrate LLM SDK/API.
-    -   [ ] Create logic to parse user query, determine necessary data.
-    -   [ ] Fetch relevant data from the database/backend API based on the query.
-    -   [ ] Structure fetched data into context for the LLM prompt.
-    -   [ ] Handle LLM response generation and potentially format for display.
--   [ ] (Optional/Advanced) Implement Retrieval-Augmented Generation (RAG): Use vector database/embeddings for retrieving relevant bill text, legislator bios, or news articles to enhance chatbot context.
--   [ ] **Integrate Chatbot into Frontend:** Add chat interface component.
+-   [ ] **Select Language Model (LLM):** GPT-4/Claude/Llama etc.
+-   [ ] **Design Chatbot Interaction Flow.**
+-   [ ] **Develop Prompt Engineering Strategy.**
+-   [ ] **Implement Backend Chat Logic:** LLM SDK, parse query, fetch data, structure context, handle response.
+-   [ ] (Optional/Advanced) Implement RAG (Vector DB/embeddings).
+-   [ ] **Integrate Chatbot into Frontend.**
 
 ## Phase 8: Deployment & Maintenance
 
 *Making the platform available and ensuring its ongoing operation.*
 
--   [ ] **Choose Deployment Strategy:** Select hosting (e.g., AWS, GCP, Heroku, Vercel) for database, backend API, and frontend. Consider containerization (Docker).
--   [ ] **Implement CI/CD Pipeline:** Set up automated testing, building, and deployment workflows (e.g., GitHub Actions).
--   [ ] **Deploy Application Stack:** Deploy database, backend, and frontend. Configure domains, SSL.
--   [ ] **Implement Platform Monitoring:** Set up logging, error tracking (e.g., Sentry), and performance monitoring for the deployed application. Monitor API usage and costs.
--   [ ] **Monitor Data Sources:** Continuously monitor LegiScan API, Idaho website, finance portal, etc., for changes. Maintain scrapers/parsers.
--   [ ] **Schedule Data Updates:** Automate the data collection, preprocessing, and model retraining pipelines.
--   [ ] **Gather User Feedback:** Implement mechanisms for users to report issues or suggest improvements.
--   [ ] **Iterate and Improve:** Plan for ongoing development based on monitoring and feedback.
+-   [ ] **Choose Deployment Strategy:** Hosting, containerization (Docker).
+-   [ ] **Implement CI/CD Pipeline:** GitHub Actions, etc.
+-   [ ] **Deploy Application Stack.**
+-   [ ] **Implement Platform Monitoring:** Logging, error tracking, performance.
+-   [ ] **Monitor Data Sources:** Maintain scrapers/parsers.
+-   [ ] **Schedule Data Updates:** Automate pipelines.
+-   [ ] **Gather User Feedback.**
+-   [ ] **Iterate and Improve.**
 
 ## Phase 9: Documentation & Testing
 
@@ -189,22 +165,16 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 -   [x] Create initial `data_collection_readme.md`.
 -   [x] Create initial project `TODO.md`.
 -   [x] Update `README.md` with initial status/structure.
--   [~] Update `TODO.md` based on current progress and platform direction (this document).
--   [ ] **Write/Update Script/Module Documentation:** Add detailed READMEs or docstrings for all key scripts/modules (`data_preprocessing.py`, `xgboost_model.py`, API endpoints, UI components, chatbot logic).
--   [ ] **Document Data Schema:** Create `docs/data_schema.md` detailing database tables, columns, types, and descriptions.
--   [ ] **Document Feature Engineering:** Create `docs/feature_engineering.md` explaining key features.
--   [ ] **Document API Endpoints:** Generate/maintain API documentation.
--   [ ] **Document Deployment & Setup:** Provide instructions for setting up development environment and deploying the platform.
--   [ ] **Add Code Comments & Docstrings:** Ensure code is well-commented.
--   [ ] **Implement Unit/Integration Tests (`pytest`):**
-    -   [ ] API response parsing/validation.
-    -   [~] Scraper parsing logic (**Needs more robust tests**).
-    -   [~] Fuzzy matching logic/edge cases (**Needs more robust tests**).
-    -   [ ] Data merging/linking logic.
-    -   [ ] Key feature calculations.
-    -   [ ] API endpoint functionality.
-    -   [ ] Chatbot data retrieval/prompt generation logic.
-    -   [ ] (Optional) Frontend component tests.
--   [ ] **Maintain `requirements.txt` / `pyproject.toml`:** Keep dependencies updated and pinned.
--   [ ] **Refactor Code:** Periodically review and refactor for clarity, efficiency, and best practices.
--   [ ] **Address TODOs/FIXMEs in Code:** Resolve inline comments.
+-   [x] Update `TODO.md` based on current progress (this update).
+-   [x] Create validation scripts documentation (`README_VALIDATION.md`).
+-   [x] Create `CHANGELOG.md`.
+-   [ ] **Write/Update Script/Module Documentation:** Add detailed READMEs/docstrings.
+-   [ ] **Document Data Schema:** `docs/data_schema.md`.
+-   [ ] **Document Feature Engineering:** `docs/feature_engineering.md`.
+-   [ ] **Document API Endpoints:** Generate/maintain API docs.
+-   [ ] **Document Deployment & Setup.**
+-   [ ] **Add Code Comments & Docstrings.**
+-   [ ] **Implement Unit/Integration Tests (`pytest`):** API parsing, Scraper parsing, Fuzzy matching, Data merging, Feature calcs, API endpoints, Chatbot logic, Frontend components.
+-   [x] **Maintain `requirements.txt`:** Dependencies updated.
+-   [ ] **Refactor Code:** Periodically review/improve.
+-   [ ] **Address TODOs/FIXMEs in Code.**

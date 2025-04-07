@@ -34,9 +34,33 @@ env/
 # Project Specific
 data/
 *.log
+# Sensitive Data
 .env
 .env.*
+.env.local
+.env.development
+.envrc
+credentials.json
+aws_config.ini
+.aws/
+.ssh/
+id_rsa*
+*config*.yml
+*secrets*
+secrets.toml
+.npmrc
+.htpasswd
+*.pem
+*.cert
+*.key
+*.db
+*.sqlite
+*.csv
+# Temporary/Backup files
+*.bak
+*.backup
+*.tmp
 
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db
