@@ -14,6 +14,7 @@ python-dotenv
 thefuzz[speedup]
 # Add Playwright for browser automation
 playwright
+requests-cache # Added for HTTP request caching
 
 # --- Data Processing & Feature Engineering (Includes Core & Planned) ---
 numpy~=1.26.4             # Numerical operations (dependency of pandas, good to pin)
@@ -37,3 +38,10 @@ seaborn~=0.13.2           # Enhanced plotting based on matplotlib
 # mlflow~=2.11.3            # (Optional) Experiment tracking and model management
 # flask~=3.0.2              # (Optional) Web framework for simple prediction API
 # streamlit~=1.34.0         # (Optional) Web framework for interactive dashboard/interface
+
+# Development/Testing (Optional, but recommended)
+pytest
+# pytest-cov
+# mypy
+# flake8
+# black

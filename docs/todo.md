@@ -19,7 +19,7 @@ This document tracks the tasks required to build and improve the Valley Vote pla
     -   [x] Implement data structuring and saving (Raw JSONs per item/session).
     -   [x] Implement basic consolidation of yearly API data into session-level JSONs.
     -   [x] Implement consolidation of yearly session JSONs into yearly CSV/JSON (`consolidate_yearly_data`).
-    -   [x] (Feature Expansion) Fetch full Bill Text, Amendments, Supplements via API (`getText`, `getAmendment`, `getSupplement`).
+    -   [x] Fetch full Bill Text, Amendments, Supplements via API (`getText`, `getAmendment`, `getSupplement`) (Requires `--fetch-*` flags).
 
 -   **Idaho Committee Membership Scraping (`data_collection.py`):**
     -   [x] Implement web scraper for current year committee memberships (ID House/Senate).
@@ -31,7 +31,7 @@ This document tracks the tasks required to build and improve the Valley Vote pla
     -   [~] **Monitor & Maintain:** Regularly check Idaho Legislature website structure and update scraper (`monitor_idaho_structure.py`). Needs automated checks or scheduled runs.
 
 -   **Idaho Campaign Finance Data (`scrape_finance_idaho.py` & related):**
-    -   [P] **Overall Status: Paused Automated Scraping** - Pivoting to manually acquired data via records request due to Sunshine Portal scraping challenges.
+    -   [P] **Overall Status: Paused Automated Scraping** - Pivoting to manually acquired data via records request due to Sunshine Portal scraping challenges. Automated Playwright-based scraping logic (`scrape_finance_idaho.py`, `test_finance_scraper.py`) is retained for reference but is not currently active or maintained.
     -   [x] **Initial Setup (Playwright - for potential future use or reference):**
         -   [x] Added Playwright dependency (`requirements.txt`).
         -   [x] Set up virtual environment (`venv`).
@@ -53,7 +53,7 @@ This document tracks the tasks required to build and improve the Valley Vote pla
         -   [ ] Refactor `scrape_finance_idaho.py` main scraping loop.
         -   [ ] Implement robust error handling and retry logic within Playwright interactions.
     -   [ ] **Parse Manually Acquired Data:**
-        -   [ ] Develop parser script (`parse_finance_idaho_manual.py` or similar) to read received CSV/other format.
+        -   [~] Develop parser script (`parse_finance_idaho_manual.py` or similar) to read received CSV/other format.
         -   [ ] Implement robust data cleaning (amounts, dates, names, addresses, etc.) based on actual data format.
         -   [ ] Standardize column names based on `config.py` maps or define new ones.
         -   [ ] Handle potential variations in file structure/format.
@@ -61,7 +61,7 @@ This document tracks the tasks required to build and improve the Valley Vote pla
     -   [~] **Develop Robust Matching (`match_finance_to_leg.py`):**
         -   [x] Initial fuzzy matching logic implemented (`thefuzz`).
         -   [x] Centralized `clean_name` utility in `src/utils.py`.
-        -   [ ] **Refine Strategy:** Improve matching based on manual data format (consider committee indicators, election year/office, filer IDs, manual review steps).
+        -   [~] **Refine Strategy:** Improve matching based on manual data format (consider committee indicators, election year/office, filer IDs, manual review steps). Needs validation with actual manual data.
         -   [ ] **Validate Matches:** Perform spot-checks/build validation set using the manual data.
     -   [ ] Extract and standardize donor details (name, address, employer, occupation) for categorization/analysis from manual data.
     -   [ ] (Optional) Extract and standardize expenditure data more thoroughly from manual data.

@@ -22,16 +22,28 @@ from tenacity import (
     before_sleep_log
 )
 
-# --- Configure Root Logger for Tenacity ---
-# Get root logger instance (used by tenacity for retry logging)
-root_logger = logging.getLogger()
-# Ensure root logger has a basic handler if not configured elsewhere initially
-if not root_logger.hasHandlers():
-    logging.basicConfig(
-        level=logging.WARNING, # Be less verbose by default for root
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
+# --- Caching Setup --- 
+import requests_cache
+
+# Configure cache settings
+CACHE_DIR = Path(".cache")
+CACHE_NAME = CACHE_DIR / "http_cache"
+CACHE_EXPIRY_SECONDS = 60 * 60 * 24 # 1 day default expiry
+
+# Ensure cache directory exists
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Install the cache globally for requests
+# This will cache responses to a SQLite database in .cache/http_cache.sqlite
+# Responses expire after CACHE_EXPIRY_SECONDS
+# It respects Cache-Control headers by default.
+requests_cache.install_cache(
+    str(CACHE_NAME),
+    backend='sqlite',
+    expire_after=CACHE_EXPIRY_SECONDS,
+    allowable_methods=['GET'], # Cache only GET requests
+    stale_if_error=True # Use stale cache if there's an error fetching fresh data
+)
 
 # --- Logging Setup ---
 def setup_logging(log_file_name: str, log_dir: Path, level=logging.INFO, mode='w') -> logging.Logger:
@@ -173,21 +185,24 @@ NAME_CLEANUP_REGEX = re.compile(
 )
 
 def clean_name(name: Optional[str]) -> Optional[str]:
-    """Cleans common titles and suffixes from a person's name string."""
-    if not name or pd.isna(name):
+    """Clean legislator names by removing titles, suffixes, and extra whitespace."""
+    if name is None:
         return None
-    try:
-        # Ensure it's a string before applying regex
-        name_str = str(name)
-        cleaned = NAME_CLEANUP_REGEX.sub('', name_str).strip()
-        # Additional whitespace cleanup
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        return cleaned if cleaned else None # Return None if cleaning results in empty string
-    except Exception as e:
-        # Log error if cleaning fails unexpectedly
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Could not clean name '{name}': {e}")
-        return str(name) # Return original string on error
+    # Ensure it's a string
+    name = str(name)
+    # Remove common titles (case-insensitive)
+    name = re.sub(r"^(Rep\.?|Sen\.?|Representative|Senator|Delegate|Del\.?|Mr\.?|Ms\.?|Dr\.?)\s+", "", name, flags=re.IGNORECASE)
+    # Remove common suffixes (case-insensitive, handling periods and roman numerals)
+    name = re.sub(r"\s+(Jr\.?|Sr\.?|I{1,3}|IV|V)$", "", name, flags=re.IGNORECASE)
+    # Remove parenthetical party/district info
+    name = re.sub(r"\s+\([RDIL\s\-].*\)$", "", name)
+    # Remove leading parenthetical party info
+    name = re.sub(r"^\([RDIL]\)\s+", "", name)
+    # Normalize whitespace
+    name = ' '.join(name.split())
+    # Strip leading/trailing whitespace potentially left over
+    name = name.strip()
+    return name
 
 # --- Network Operations ---
 DEFAULT_HEADERS = {
@@ -206,7 +221,7 @@ DEFAULT_HEADERS = {
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1.5, min=3, max=45),
     retry=retry_if_exception_type((requests.exceptions.Timeout, requests.exceptions.ConnectionError)),
-    before_sleep=before_sleep_log(root_logger, logging.WARNING)
+    before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING)
 )
 def fetch_page(
     url: str,
@@ -408,3 +423,42 @@ def setup_project_paths(base_dir_override: Optional[Union[str, Path]] = None) ->
     #     logger.debug(f"Path '{key}': {path}")
 
     return paths
+
+# --- Vote Mapping --- 
+# Common standardization map for vote text to numeric values
+VOTE_TEXT_MAP = {
+    'yes': 1,
+    'aye': 1,
+    'yea': 1,
+    'y': 1,
+    'no': -1,
+    'nay': -1,
+    'n': -1,
+    'absent': 0,
+    'excused': 0,
+    'not voting': 0,
+    'present': 0
+}
+
+def map_vote_value(vote_text: Optional[str], vote_map: Dict[str, int] = VOTE_TEXT_MAP) -> int:
+    """Map vote text to numeric values using a provided map.
+
+    Args:
+        vote_text: The raw vote text (e.g., "Yea", "Nay", "Not Voting").
+        vote_map: A dictionary mapping lowercased text to integer values.
+                  Defaults to VOTE_TEXT_MAP from config.
+
+    Returns:
+        Mapped integer value, or -9 if text is None or not found in map.
+    """
+    if vote_text is None:
+        return -9 # Use -9 for truly unknown/missing votes
+    # Standardize by lowercasing and stripping whitespace
+    vt = str(vote_text).strip().lower()
+    return vote_map.get(vt, -9) # Default to -9 if not found in map
+
+# --- Path Setup ---
+# Define default base data directory relative to project structure
+# Assuming utils.py is in src/, which is one level below project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_BASE_DATA_DIR = PROJECT_ROOT / 'data'

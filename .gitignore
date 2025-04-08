@@ -56,6 +56,27 @@ secrets.toml
 *.db
 *.sqlite
 *.csv
+# API and Authentication
+*api_key*
+*apikey*
+*token*
+*auth*
+*credentials*
+*oauth*
+*client_secret*
+*client_id*
+.netrc
+# Browser/Session Data
+cookies.txt
+*cookies*
+*session*
+.playwright-cookies/
+browser_data/
+# Financial Data
+financial_*_cache/
+*finance_credentials*
+*_private.*
+*confidential*
 # Temporary/Backup files
 *.bak
 *.backup
@@ -64,3 +85,24 @@ secrets.toml
 # OS
 .DS_Store
 Thumbs.db
+
+# Custom - Valley Vote Specific Ignores
+*.session.json
+*.error.json
+*.html # Raw HTML scrapes
+*.sqlite # Cache files
+*.sqlite-journal
+data_collection.log*
+valley_vote.log*
+
+# Add cache directory
+.cache/
+# Debug artifacts
+debug_*.json
+debug_*.html
+debug_*.log
+artifacts/debug/
+*_debug_dump*
+# Playwright specific
+playwright-report/
+test-results/

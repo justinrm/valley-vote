@@ -32,6 +32,8 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from tqdm import tqdm
+# Add Playwright imports
+from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 
 # Local imports
 from .config import (
@@ -61,22 +63,256 @@ logger = logging.getLogger(Path(FINANCE_SCRAPE_LOG_FILE).stem)
 CONTRIBUTION_COLUMN_MAP = FINANCE_COLUMN_MAPS['contributions']
 EXPENDITURE_COLUMN_MAP = FINANCE_COLUMN_MAPS['expenditures']
 
+# --- Helper Functions for Playwright ---
+def safe_goto(page: Page, url: str, timeout_ms: int = 60000) -> bool:
+    """Navigate to a URL with error handling."""
+    try:
+        logger.debug(f"Navigating to {url}")
+        response = page.goto(url, wait_until='domcontentloaded', timeout=timeout_ms)
+        if response and not response.ok:
+            logger.error(f"Page load failed for {url}. Status: {response.status}")
+            return False
+        logger.debug(f"Successfully navigated to {url}")
+        return True
+    except PlaywrightTimeoutError:
+        logger.error(f"Timeout loading page: {url}")
+        return False
+    except Exception as e:
+        logger.error(f"Error navigating to {url}: {e}")
+        return False
+
+def save_debug_html(page: Page, filename_prefix: str, paths: Dict[str, Path]):
+    """Saves the current page HTML for debugging."""
+    artifacts_dir = paths['base'] / 'artifacts' if 'artifacts' not in paths else paths['artifacts']
+    debug_path = artifacts_dir / 'debug'
+    debug_path.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d%H%M%S")
+    debug_file = debug_path / f"{filename_prefix}_{timestamp}.html"
+    try:
+        debug_file.write_text(page.content(), encoding='utf-8')
+        logger.info(f"Saved debug HTML to: {debug_file}")
+    except Exception as e:
+        logger.error(f"Failed to save debug HTML: {e}")
+
+# --- Refactored Search Function Using Playwright ---
+def search_with_playwright(
+    search_term: str,
+    year: int,
+    data_type: str,
+    paths: Dict[str, Path]
+) -> Optional[Tuple[str, pd.DataFrame]]:
+    """
+    Uses Playwright to search for finance data and return the export URL and possibly data.
+    
+    Args:
+        search_term: Name of legislator or committee.
+        year: Election year or reporting year.
+        data_type: 'contributions' or 'expenditures'.
+        paths: Project paths dictionary.
+        
+    Returns:
+        Optional tuple of (export_url, data_frame).
+        If export_url is None, no data could be found.
+    """
+    logger.info(f"Initiating finance search with Playwright: Term='{search_term}', Year={year}, Type={data_type}")
+    
+    # Configure selectors based on website inspection
+    name_input_selector = '#panel-campaigns-content input[role="combobox"][id^="react-select-"]'
+    date_input_selector = 'input[placeholder="Any Date"][type="tel"]'
+    search_button_selector = 'button:has-text("Search")'
+    results_grid_indicator_selector = 'div[role="columnheader"][class*="header-cell-label"], div.ag-header-cell-text'
+    export_button_selector = 'button[title*="Export" i], button:has-text("Export to CSV"), a:has-text("Export")'
+    
+    # Calculate date range for the year
+    start_date = f"01/01/{year}"
+    end_date = f"12/31/{year}"
+    
+    with sync_playwright() as p:
+        browser = None
+        try:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                accept_downloads=True,  # Important for handling file downloads
+                viewport={'width': 1280, 'height': 1024}
+            )
+            page = context.new_page()
+            
+            # Navigate to search page
+            if not safe_goto(page, ID_FINANCE_BASE_URL, timeout_ms=60000):
+                logger.error(f"Failed to load search page: {ID_FINANCE_BASE_URL}")
+                return None
+            
+            logger.info("Search page loaded. Waiting for dynamic content...")
+            page.wait_for_timeout(3000)
+            
+            # --- Fill search form ---
+            try:
+                # Locate and fill name input
+                logger.info(f"Looking for name search input field...")
+                name_input = page.locator(name_input_selector).first
+                name_input.wait_for(state='attached', timeout=15000)
+                
+                # Focus and fill name input
+                logger.info(f"Filling search term: '{search_term}'")
+                try:
+                    name_input.focus(timeout=5000)
+                    page.wait_for_timeout(500)
+                except PlaywrightTimeoutError:
+                    # Try JavaScript focus as a fallback
+                    input_id = name_input.get_attribute('id')
+                    if input_id:
+                        page.evaluate(f"document.querySelector('#{input_id}').focus()")
+                        page.wait_for_timeout(500)
+                    else:
+                        logger.error("Could not focus name input field")
+                        return None
+                
+                # Type name and select first option
+                name_input.fill(search_term, timeout=10000)
+                page.wait_for_timeout(1000)
+                
+                # Try to click the dropdown option that appears
+                option_selector = 'div[id*="react-select-"][class*="-option"]'
+                first_option = page.locator(option_selector).first
+                try:
+                    first_option.wait_for(state='visible', timeout=5000)
+                    first_option.click(timeout=5000)
+                    page.wait_for_timeout(500)
+                except PlaywrightTimeoutError:
+                    logger.warning(f"No dropdown options appeared for '{search_term}'. Will try to proceed.")
+                    # Press Enter as a fallback
+                    name_input.press('Enter')
+                    page.wait_for_timeout(500)
+                
+                # Fill date range inputs
+                logger.info(f"Setting date range: {start_date} to {end_date}")
+                date_inputs = page.locator(date_input_selector)
+                if date_inputs.count() >= 2:
+                    start_date_input = date_inputs.nth(0)
+                    end_date_input = date_inputs.nth(1)
+                    
+                    start_date_input.fill(start_date, timeout=5000)
+                    end_date_input.fill(end_date, timeout=5000)
+                    page.wait_for_timeout(500)
+                else:
+                    logger.warning("Could not find both date inputs. Proceeding with default date range.")
+                
+                # Submit search
+                logger.info("Submitting search...")
+                search_button = page.locator(search_button_selector).first
+                search_button.click(timeout=10000)
+                
+                # Wait for results to appear
+                logger.info("Waiting for search results...")
+                try:
+                    page.locator(results_grid_indicator_selector).first.wait_for(
+                        state='visible', timeout=45000
+                    )
+                    logger.info("Search results appeared.")
+                    page.wait_for_timeout(2000)  # Let the grid stabilize
+                    
+                    # Check for "no results" message
+                    no_results_selector = 'div:has-text("No records found"), div:has-text("No results")'
+                    if page.locator(no_results_selector).count() > 0:
+                        logger.info(f"Search successful but returned 'No Records Found' for '{search_term}', {year}.")
+                        return None
+                    
+                    # Look for export button
+                    logger.info("Looking for export button...")
+                    export_button = page.locator(export_button_selector).first
+                    try:
+                        export_button.wait_for(state='visible', timeout=20000)
+                        
+                        # Setup download listener
+                        logger.info("Setting up download listener...")
+                        download_path = None
+                        with page.expect_download(timeout=60000) as download_info:
+                            logger.info("Clicking export button...")
+                            export_button.click(timeout=10000)
+                            
+                            # Wait for download to start
+                            download = download_info.value
+                            logger.info(f"Download started: {download.suggested_filename}")
+                            
+                            # Define download location
+                            raw_dir = paths['raw_campaign_finance'] / 'idaho' / str(year)
+                            raw_dir.mkdir(parents=True, exist_ok=True)
+                            safe_term = "".join(c if c.isalnum() else '_' for c in search_term)[:50].strip('_')
+                            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                            download_path = raw_dir / f"{data_type}_{safe_term}_{year}_{timestamp}.csv"
+                            
+                            # Save the file
+                            download.save_as(download_path)
+                            logger.info(f"Downloaded file saved to: {download_path}")
+                        
+                        if download_path and download_path.exists():
+                            # Success - read the data
+                            logger.info(f"Reading downloaded data from {download_path}")
+                            try:
+                                df = pd.read_csv(download_path, low_memory=False)
+                                if not df.empty:
+                                    return (str(download_path), df)
+                                else:
+                                    logger.warning(f"Downloaded file is empty: {download_path}")
+                                    return None
+                            except Exception as e_read:
+                                logger.error(f"Error reading downloaded file: {e_read}")
+                                return None
+                        else:
+                            logger.error("Download failed or file not saved properly")
+                            return None
+                            
+                    except PlaywrightTimeoutError:
+                        logger.error("Timeout waiting for export button")
+                        save_debug_html(page, f"export_button_timeout_{data_type}_{year}", paths)
+                        return None
+                    
+                except PlaywrightTimeoutError:
+                    logger.error("Timeout waiting for search results")
+                    save_debug_html(page, f"results_timeout_{data_type}_{year}", paths)
+                    return None
+                
+            except Exception as e:
+                logger.error(f"Error during search form interaction: {e}")
+                save_debug_html(page, f"search_error_{data_type}_{year}", paths)
+                return None
+                
+        except Exception as e:
+            logger.error(f"Unexpected error in Playwright search: {e}")
+            return None
+        finally:
+            if browser:
+                browser.close()
+    
+    return None
+
 # --- Helper Functions ---
-def standardize_columns(df: pd.DataFrame, column_map: Dict[str, List[str]]) -> pd.DataFrame:
-    """Standardizes DataFrame columns based on a mapping, ensuring all standard columns exist.
+def standardize_columns(df: pd.DataFrame, data_type: str) -> pd.DataFrame:
+    """Standardizes DataFrame columns for a specific finance data type.
     
     Args:
         df: Input DataFrame to standardize
-        column_map: Dictionary mapping standard column names to possible variations
+        data_type: Type of finance data ('contributions' or 'expenditures')
         
     Returns:
         DataFrame with standardized column names and all required columns present
+        
+    Raises:
+        ValueError: If data_type is not recognized
     """
+    # Get the appropriate column map based on data_type
+    if data_type == 'contributions':
+        column_map = CONTRIBUTION_COLUMN_MAP
+    elif data_type == 'expenditures':
+        column_map = EXPENDITURE_COLUMN_MAP
+    else:
+        raise ValueError(f"Unknown finance data type: {data_type}")
+        
     # Ensure DataFrame is not empty
     if df.empty:
         logger.warning("Attempted to standardize columns on an empty DataFrame.")
         # Return DataFrame with standard columns but no data
-        return pd.DataFrame(columns=list(column_map.keys()))
+        return pd.DataFrame(columns=list(column_map.values()))
 
     original_columns = df.columns.tolist() # Keep original for logging
     # Clean column names: lowercase, strip whitespace, remove trailing colons
@@ -84,29 +320,24 @@ def standardize_columns(df: pd.DataFrame, column_map: Dict[str, List[str]]) -> p
     rename_dict = {}
     found_standard_names = set()
 
-    for standard_name, variations in column_map.items():
-        for var in variations:
-            if var in df.columns:
-                if standard_name not in found_standard_names:
-                    # Only map if the standard name hasn't been mapped yet
-                    rename_dict[var] = standard_name
-                    found_standard_names.add(standard_name)
-                    logger.debug(f"Mapping source column '{var}' to standard '{standard_name}'")
-                    break # Use first matching variation found
-            # else: logger.debug(f"Variation '{var}' not found in cleaned columns: {df.columns.tolist()}")
+    for orig_col, std_col in column_map.items():
+        if orig_col.lower() in df.columns:
+            rename_dict[orig_col.lower()] = std_col
+            found_standard_names.add(std_col)
+            logger.debug(f"Mapping source column '{orig_col}' to standard '{std_col}'")
 
     # Log unmapped columns after cleaning
     current_cols_set = set(df.columns)
     mapped_source_cols_set = set(rename_dict.keys())
     unmapped_cols = list(current_cols_set - mapped_source_cols_set)
     if unmapped_cols:
-         logger.warning(f"Unmapped columns found after cleaning/mapping: {unmapped_cols}. Check column_map or source data. Original columns: {original_columns}")
+         logger.warning(f"Unmapped columns found: {unmapped_cols}. Original columns: {original_columns}")
 
     # Perform renaming
     df = df.rename(columns=rename_dict)
 
     # Ensure all standard columns exist, add missing ones with pd.NA
-    standard_columns_list = list(column_map.keys())
+    standard_columns_list = list(column_map.values())
     added_cols = []
     for standard_name in standard_columns_list:
         if standard_name not in df.columns:
@@ -116,7 +347,6 @@ def standardize_columns(df: pd.DataFrame, column_map: Dict[str, List[str]]) -> p
          logger.debug(f"Added missing standard columns: {added_cols}")
 
     # Return DataFrame with only the standard columns in the defined order
-    # Filter final_columns to include only those that actually exist in df (should be all after adding missing)
     final_columns = [col for col in standard_columns_list if col in df.columns]
     return df[final_columns]
 
@@ -252,297 +482,81 @@ def find_export_link(soup: BeautifulSoup, data_type: str, base_url: str) -> Opti
 def search_for_finance_data_link(
     search_term: str,
     year: int,
-    data_type: str, # 'contributions' or 'expenditures'
-    paths: Dict[str, Path] # Pass paths dict for saving debug files
+    data_type: str,
+    paths: Dict[str, Path]
     ) -> Optional[str]:
     """
-    Searches the Idaho Sunshine Portal for a finance data download link.
-    Handles ASP.NET form submission with ViewState.
-
-    Args:
-        search_term: Name of legislator or committee.
-        year: Election year or reporting year.
-        data_type: 'contributions' or 'expenditures'.
-        paths: Project paths dictionary for potential debug output.
-
-    Returns:
-        Absolute URL string for the download link, or None if not found or error.
+    DEPRECATED. Searches the Idaho Sunshine Portal for a finance data download link.
+    This function is kept for backward compatibility but will log a warning.
+    
+    Use search_with_playwright instead.
     """
-    # Use only the base URL as the search page entry point
-    search_page_url = ID_FINANCE_BASE_URL 
-    logger.info(f"Initiating finance search: Term='{search_term}', Year={year}, Type={data_type}, URL={search_page_url}")
-
-    # Use a session object to handle cookies potentially set by the server
-    session = requests.Session()
-    # Set headers common for browser mimicry
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36', # Updated UA
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Connection': 'keep-alive',
-        'Referer': ID_FINANCE_BASE_URL, # Set base referer
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'same-origin', # Usually 'same-origin' after first page load
-        'Sec-Fetch-User': '?1',
-    })
-
-    try:
-        # --- Step 1: Initial GET to load the search page and get form state ---
-        logger.debug(f"Fetching initial search page to get form state: {search_page_url}")
-        try:
-            initial_response = session.get(search_page_url, timeout=45, allow_redirects=True)
-            initial_response.raise_for_status() # Check for HTTP errors (4xx, 5xx)
-            logger.debug(f"Initial GET successful (Status: {initial_response.status_code}, URL: {initial_response.url})")
-        except requests.exceptions.RequestException as e_get:
-            logger.error(f"Failed to fetch initial search page {search_page_url}: {e_get}")
-            return None
-
-        initial_soup = BeautifulSoup(initial_response.text, 'html.parser')
-        hidden_fields = get_hidden_form_fields(initial_soup)
-        # Check if critical fields were extracted (get_hidden_form_fields logs errors)
-        if not hidden_fields or '__VIEWSTATE' not in hidden_fields:
-            logger.error("Aborting search due to missing critical hidden form fields.")
-            # Save initial page HTML for debugging
-            debug_path = paths.get('artifacts', paths['base'] / 'artifacts') / 'debug'
-            debug_path.mkdir(parents=True, exist_ok=True)
-            debug_file = debug_path / f"initial_search_page_error_{time.strftime('%Y%m%d%H%M%S')}.html"
-            try:
-                 debug_file.write_text(initial_response.text, encoding='utf-8', errors='replace')
-                 logger.info(f"Saved initial search page HTML (missing fields) for debugging to: {debug_file}")
-            except Exception as e_save:
-                 logger.error(f"Failed to save initial debug HTML: {e_save}")
-            return None
-
-        # --- Step 2: Construct the POST data payload ---
-        # Field names require VERIFICATION by inspecting the actual form in a browser.
-        # These are common patterns but may change.
-        form_data = hidden_fields.copy() # Start with ViewState etc.
-
-        # --- VERIFY THESE FIELD NAMES ---
-        # Candidate/Committee Name Input: (e.g., ctl00$DefaultContent$CampaignSearch$txtName)
-        form_data['ctl00$DefaultContent$CampaignSearch$txtName'] = search_term
-        # Year Input: (e.g., ctl00$DefaultContent$CampaignSearch$txtYear or ...ddlYear)
-        form_data['ctl00$DefaultContent$CampaignSearch$txtYear'] = str(year)
-        # Search Button: (e.g., ctl00$DefaultContent$CampaignSearch$btnSearch) - Value is often important
-        form_data['ctl00$DefaultContent$CampaignSearch$btnSearch'] = 'Search' # The 'value' attribute of the button
-
-        # Other potential fields (Verify if they exist and are needed):
-        # - Radio buttons for search type (Candidate/Committee)
-        # - Dropdowns for office type
-        # - Checkboxes for report types
-        # form_data['ctl00$DefaultContent$CampaignSearch$rblSearchType'] = 'candCmte' # Example value for candidate/committee radio
-
-        # Log crucial parts of form data, masking ViewState if too long
-        log_form_data = {k: (v[:50] + '...' if isinstance(v, str) and len(v) > 100 else v)
-                         for k, v in form_data.items()}
-        logger.debug(f"Constructed POST data (sample): {log_form_data}")
-
-        # --- Step 3: Make the POST request to submit the search ---
-        logger.info(f"Submitting search POST request to {search_page_url}...")
-        try:
-            post_response = session.post(
-                search_page_url,
-                data=form_data,
-                timeout=75, # Allow longer timeout for search processing
-                allow_redirects=True,
-                 # Update Referer to the page we are posting from
-                 headers={'Referer': initial_response.url} # Use the URL we actually fetched
-            )
-            post_response.raise_for_status() # Check for HTTP errors on POST response
-            logger.debug(f"Search POST request successful (Status: {post_response.status_code}, Final URL: {post_response.url})")
-
-            # Optional: Check if final URL suggests an error page pattern
-            if "error" in post_response.url.lower() or "login" in post_response.url.lower():
-                 logger.warning(f"POST request resulted in a potential error/login page: {post_response.url}")
-
-        except requests.exceptions.RequestException as e_post:
-            logger.error(f"Search POST request failed for '{search_term}' ({year}): {e_post}")
-            return None
-
-        # --- Step 4: Parse the response HTML for error messages and the download link ---
-        results_soup = BeautifulSoup(post_response.text, 'html.parser')
-
-        # Check for explicit error messages on the results page
-        # Look for common ASP.NET validation summary controls or specific error divs/spans
-        # Example Selectors (ADJUST BASED ON INSPECTION):
-        # error_selectors = ['#ctl00_ContentPlaceHolder1_ValidationSummary1', '.error-message', 'span.error']
-        error_tags = results_soup.select('div[id*="ValidationSummary"], div[class*="error"], span[class*="error"]')
-        error_text_found = None
-        for tag in error_tags:
-             text = tag.get_text(" ", strip=True)
-             if text and len(text) > 5: # Ignore empty or very short tags
-                  error_text_found = text
-                  break # Use the first significant error message found
-
-        if error_text_found:
-            # Check for "no records found" specifically
-            if "no records found" in error_text_found.lower() or "no results found" in error_text_found.lower():
-                 logger.info(f"Search successful but returned 'No Records Found' for '{search_term}', {year}.")
-                 # This is not an error, just no data for this search. Return None.
-                 return None
-            else:
-                 # Log other errors as warnings, as sometimes pages show errors but still contain data links
-                 logger.warning(f"Found potential error/validation message on results page: {error_text_found[:250]}...")
-
-        # Attempt to find the specific export link (CSV preferred)
-        export_url = find_export_link(results_soup, data_type, ID_FINANCE_BASE_URL)
-
-        if export_url:
-             logger.info(f"Successfully found export URL for '{search_term}', {year}, {data_type}")
-             return export_url
-        else:
-             logger.warning(f"Could not find download link for '{search_term}', {year}, {data_type} on results page.")
-             # Save the search results HTML for debugging if link not found
-             # Use artifacts directory from paths dict
-             debug_path = paths.get('artifacts', paths['base'] / 'artifacts') / 'debug'
-             debug_path.mkdir(parents=True, exist_ok=True)
-             # Sanitize search term for filename
-             safe_term = "".join(c if c.isalnum() else '_' for c in search_term)[:50].strip('_')
-             debug_file = debug_path / f"search_results_{safe_term}_{year}_{data_type}_{time.strftime('%Y%m%d%H%M%S')}.html"
-             try:
-                  debug_file.write_text(post_response.text, encoding='utf-8', errors='replace')
-                  logger.warning(f"Saved search results HTML (link not found) for debugging to: {debug_file}")
-             except Exception as e_save:
-                  logger.error(f"Failed to save debug HTML: {e_save}")
-             return None # Indicate link not found
-
-    # Catch-all for unexpected errors during the process
-    except Exception as e:
-        logger.error(f"Unexpected error during finance search process for '{search_term}' ({year}, {data_type}): {e}", exc_info=True)
-        return None
+    logger.warning("search_for_finance_data_link is deprecated. Use search_with_playwright instead.")
+    # Call the new function if we want to maintain compatibility
+    result = search_with_playwright(search_term, year, data_type, paths)
+    if result:
+        # Return just the file path as the "download link" for compatibility
+        return result[0]
+    return None
 
 # --- Data Downloading and Processing ---
 def download_and_extract_finance_data(
-    download_url: str,
+    download_path: str,
+    data_df: Optional[pd.DataFrame],
     source_search_term: str, # e.g., legislator name used in search
     search_year: int,
     data_type: str, # 'contributions' or 'expenditures'
     paths: Dict[str, Path]
 ) -> Optional[pd.DataFrame]:
-    """Downloads, processes, standardizes, and cleans finance data (assumes CSV or detectable)."""
-    logger.info(f"Attempting download: Type='{data_type}', Term='{source_search_term}', Year={search_year}")
-    logger.debug(f"Download URL: {download_url}")
-
-    # Use utils.fetch_page for robust GET request with retries
-    # Request as bytes initially to better handle different encodings or non-text files
-    file_content_bytes = fetch_page(download_url, timeout=120, return_bytes=True) # Longer timeout for downloads
-
-    if file_content_bytes is None: # Check if fetch_page failed after retries
-        logger.error(f"Failed to download content from {download_url} after retries.")
-        return None
-    if len(file_content_bytes) < 100: # Check for suspiciously small files (using bytes length)
-        logger.warning(f"Downloaded file from {download_url} is very small ({len(file_content_bytes)} bytes). May be empty or an error page.")
-        # Try decoding briefly to check if it's HTML
+    """
+    Processes, standardizes, and cleans finance data that was downloaded using Playwright.
+    
+    Args:
+        download_path: Path to the downloaded file.
+        data_df: DataFrame of already loaded data (if available).
+        source_search_term: Search term used to find the data.
+        search_year: Year of the data.
+        data_type: 'contributions' or 'expenditures'.
+        paths: Project paths dictionary.
+        
+    Returns:
+        Standardized DataFrame or None if processing failed.
+    """
+    logger.info(f"Processing finance data: Type='{data_type}', Term='{source_search_term}', Year={search_year}")
+    
+    raw_path = Path(download_path)
+    
+    # If DataFrame was not passed, try to load from file
+    if data_df is None:
+        if not raw_path.exists():
+            logger.error(f"Downloaded file does not exist: {raw_path}")
+            return None
+            
         try:
-            decoded_start = file_content_bytes[:200].decode('utf-8', errors='ignore').strip().lower()
-            if decoded_start.startswith(('<!doctype html', '<html', '<head', '<body')):
-                logger.error(f"Downloaded content appears to be HTML, not data. URL: {download_url}")
-                # Save HTML error page for debugging
-                error_html_path = paths.get('artifacts', paths['base'] / 'artifacts') / 'debug' / f"download_error_{data_type}_{search_year}_{datetime.now().strftime('%Y%m%d%H%M%S')}.html"
-                error_html_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    with open(error_html_path, 'wb') as f_err: f_err.write(file_content_bytes)
-                    logger.info(f"Saved potential error HTML to: {error_html_path}")
-                except Exception as e_save: logger.error(f"Failed to save error HTML: {e_save}")
-                return None
-        except Exception:
-             pass # Ignore decoding errors for this check
-
-    # --- Save Raw Content ---
-    # Define raw file path (state assumed to be Idaho, add year subdirectory)
-    raw_dir = paths['raw_campaign_finance'] / 'idaho' / str(search_year)
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    # Sanitize search term for filename
-    safe_search_term = "".join(c if c.isalnum() else '_' for c in source_search_term)[:50].strip('_')
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    # Try to guess extension, default to .raw
-    file_ext = '.csv' # Assume CSV by default from Sunshine Portal links
-    # Could add logic here to sniff content type if needed (e.g., check for Excel magic bytes)
-    raw_filename = f"{data_type}_{safe_search_term}_{search_year}_{timestamp}{file_ext}"
-    raw_path = raw_dir / raw_filename
-
-    try:
-        with open(raw_path, 'wb') as f_raw:
-            f_raw.write(file_content_bytes)
-        logger.info(f"Saved raw downloaded content ({len(file_content_bytes)} bytes) to {raw_path}")
-    except Exception as e:
-        logger.error(f"Error saving raw content to {raw_path}: {e}")
-        # Decide whether to continue processing despite save failure
-        # return None # Option: Fail if raw cannot be saved
-        logger.warning("Continuing processing despite failure to save raw file.")
-
-    # --- Attempt to Process Data (primarily as CSV) ---
-    df = None
-    detected_encoding = None
-    try:
-        # Use io.BytesIO to read the bytes content as a file-like object for pandas
-        file_buffer = io.BytesIO(file_content_bytes)
-
-        # Attempt 1: Try UTF-8
-        try:
-            df = pd.read_csv(
-                file_buffer,
-                encoding='utf-8',
-                low_memory=False,
-                on_bad_lines='warn', # Report lines that cause parsing issues
-                # quoting=csv.QUOTE_MINIMAL, # Adjust quoting if necessary
-                # escapechar='\\', # Adjust escape character if necessary
-            )
-            detected_encoding = 'utf-8'
-            logger.debug(f"Successfully read CSV data using utf-8 for {raw_path.name}")
-        except (UnicodeDecodeError, pd.errors.ParserError) as e_utf8:
-            logger.warning(f"UTF-8 CSV parsing failed for {raw_path.name}: {str(e_utf8)[:200]}. Trying latin-1...")
-            # Reset buffer position for next read attempt
-            file_buffer.seek(0)
-            # Attempt 2: Try Latin-1 (common fallback)
+            # Try UTF-8 first
+            data_df = pd.read_csv(raw_path, encoding='utf-8', low_memory=False)
+            logger.debug(f"Successfully read CSV data using utf-8 from {raw_path.name}")
+        except UnicodeDecodeError:
             try:
-                df = pd.read_csv(file_buffer, encoding='latin-1', low_memory=False, on_bad_lines='warn')
-                detected_encoding = 'latin-1'
-                logger.debug(f"Successfully read CSV data using latin-1 for {raw_path.name}")
-            except (pd.errors.ParserError, Exception) as e_latin1:
-                logger.error(f"Latin-1 CSV parsing also failed for {raw_path.name}: {str(e_latin1)[:200]}")
-                # --- Placeholder for Excel Reading ---
-                # If CSV fails consistently and Excel is a possibility:
-                # logger.info("Attempting Excel parsing...")
-                # try:
-                #     file_buffer.seek(0)
-                #     df = pd.read_excel(file_buffer, engine='openpyxl') # Requires openpyxl installed
-                #     detected_encoding = 'excel'
-                #     logger.info(f"Successfully read Excel data for {raw_path.name}")
-                # except Exception as e_excel:
-                #     logger.error(f"Excel parsing also failed for {raw_path.name}: {e_excel}")
-                #     return None # Give up if all attempts fail
-                # --- End Excel Placeholder ---
-                return None # Give up if CSV fails and Excel not implemented/failed
-
-    except Exception as e_read:
-         # Catch other potential errors during file reading setup (e.g., memory issues?)
-         logger.error(f"Unexpected error during data processing setup for {raw_path.name}: {e_read}", exc_info=True)
-         return None
-
-    # Check if DataFrame is empty after successful read
-    if df is None or df.empty:
-        logger.warning(f"Parsing successful (encoding: {detected_encoding}), but resulted in an empty DataFrame for {raw_path.name}.")
-        # Optionally return empty dataframe instead of None if needed downstream
-        # return pd.DataFrame()
-        return None # Treat as no data extracted
-
-    # --- Standardize Columns ---
-    logger.debug(f"Standardizing {len(df)} rows for {data_type} from {raw_path.name}...")
-    if data_type == 'contributions':
-        df_standardized = standardize_columns(df.copy(), CONTRIBUTION_COLUMN_MAP)
-    elif data_type == 'expenditures':
-        df_standardized = standardize_columns(df.copy(), EXPENDITURE_COLUMN_MAP)
-    else:
-        # This case should ideally not be reached if called correctly
-        logger.error(f"Invalid data_type '{data_type}' provided for column standardization.")
+                # Try latin-1 as fallback
+                data_df = pd.read_csv(raw_path, encoding='latin-1', low_memory=False)
+                logger.debug(f"Successfully read CSV data using latin-1 from {raw_path.name}")
+            except Exception as e:
+                logger.error(f"Failed to read CSV data: {e}")
+                return None
+    
+    # Check if DataFrame is empty
+    if data_df is None or data_df.empty:
+        logger.warning(f"No data available from {raw_path.name}")
         return None
-
+    
+    # --- Standardize Columns ---
+    logger.debug(f"Standardizing {len(data_df)} rows for {data_type} from {raw_path.name}...")
+    df_standardized = standardize_columns(data_df.copy(), data_type)
+    
     # --- Add Metadata Columns ---
     df_standardized['source_search_term'] = source_search_term
-    df_standardized['data_source_url'] = download_url
+    df_standardized['data_source_url'] = ID_FINANCE_BASE_URL
     df_standardized['scrape_year'] = search_year # Year used for the search
     df_standardized['raw_file_path'] = str(raw_path) # Path to the saved raw file
     df_standardized['scrape_timestamp'] = datetime.now().isoformat()
@@ -553,21 +567,21 @@ def download_and_extract_finance_data(
     amount_col = 'contribution_amount' if data_type == 'contributions' else 'expenditure_amount'
     if amount_col in df_standardized.columns:
         # Ensure it's string first, replace symbols, handle parentheses for negatives
-        # Regex: Remove $, ,, strip whitespace. Handle (num) -> -num pattern separately if needed.
-        df_standardized[amount_col] = df_standardized[amount_col].astype(str).str.replace(r'[$,]', '', regex=True).str.strip()
+        # Fix: convert the column to Series first, then apply string operations
+        amount_series = df_standardized[amount_col].astype(str)
+        df_standardized[amount_col] = amount_series.str.replace(r'[$,]', '', regex=True).str.strip()
+        
         # Handle potential parentheses for negative numbers, e.g., (100.00) -> -100.00
         neg_mask = df_standardized[amount_col].str.startswith('(') & df_standardized[amount_col].str.endswith(')')
         # Apply conversion for negative numbers
         df_standardized.loc[neg_mask, amount_col] = '-' + df_standardized.loc[neg_mask, amount_col].str.slice(1, -1)
-        # Convert to numeric, coercing errors to NaN (which becomes <NA> for Int/Float dtypes)
+        # Convert to numeric, coercing errors to NaN
         df_standardized[amount_col] = pd.to_numeric(df_standardized[amount_col], errors='coerce')
-        # Optional: Log rows where conversion failed
-        failed_amount_conversions = df_standardized[amount_col].isna().sum() - df_standardized[amount_col].isnull().sum() # Count NaNs introduced by coerce
+        # Log rows where conversion failed
+        failed_amount_conversions = df_standardized[amount_col].isna().sum() - df_standardized[amount_col].isnull().sum()
         if failed_amount_conversions > 0:
              logger.warning(f"Could not convert {amount_col} to numeric for {failed_amount_conversions} rows in {raw_path.name}.")
-        # Optional: Fill NaNs if appropriate (e.g., with 0, but NA is usually better)
-        # df_standardized[amount_col] = df_standardized[amount_col].fillna(0)
-
+    
     # Convert date columns to datetime objects, coercing errors
     date_col = 'contribution_date' if data_type == 'contributions' else 'expenditure_date'
     if date_col in df_standardized.columns:
@@ -578,14 +592,8 @@ def download_and_extract_finance_data(
              failed_date_conversions = df_standardized[date_col].isna().sum() - df_standardized[date_col].isnull().sum()
              if failed_date_conversions > 0:
                   logger.warning(f"Could not convert {date_col} to datetime for {failed_date_conversions} rows in {raw_path.name}.")
-        # Optional: Format date for consistency if needed (e.g., remove time part)
-        # df_standardized[date_col] = df_standardized[date_col].dt.date
 
-    # Add other cleaning steps:
-    # - Trim whitespace from string columns
-    # - Standardize state abbreviations (e.g., 'ID', 'Id', 'idaho' -> 'ID')
-    # - Validate ZIP codes (basic format check)
-    # - Clean/standardize contribution/expenditure types if needed
+    # Clean string columns
     string_columns = df_standardized.select_dtypes(include='object').columns
     for col in string_columns:
         if col not in ['raw_file_path', 'data_source_url']: # Avoid stripping paths/URLs
@@ -599,12 +607,10 @@ def download_and_extract_finance_data(
 def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int] = None, data_dir: Optional[Union[str, Path]] = None) -> Optional[Path]:
     """Main function to orchestrate scraping Idaho campaign finance data."""
     # Setup paths using the provided base directory or default from config
-    # Ensure paths are set up before logging is fully configured if base_dir changes log path
     paths = setup_project_paths(data_dir)
 
-    # Ensure logger is set up correctly for this module (might be redundant if main.py called setup_logging first)
-    # This ensures it works standalone correctly. setup_logging handles multiple calls gracefully.
-    global logger # Make sure we're using the module-level logger
+    # Ensure logger is set up correctly for this module
+    global logger
     logger = setup_logging(FINANCE_SCRAPE_LOG_FILE, paths['log'])
 
     # Determine year range
@@ -616,23 +622,21 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
         logger.error(f"Start year ({start_year}) cannot be after end year ({end_year}).")
         return None
 
-    logger.info(f"=== Starting Idaho Campaign Finance Scraping ===")
+    logger.info(f"=== Starting Idaho Campaign Finance Scraping with Playwright ===")
     logger.info(f"Data Source: Idaho Sunshine Portal ({ID_FINANCE_BASE_URL})")
     logger.info(f"Target Years: {start_year}-{end_year}")
     logger.info(f"Base Data Directory: {paths['base']}")
-    logger.warning("Finance scraping depends heavily on website structure and form field names (e.g., 'ctl00$...') - verify these if scraping fails.")
 
     # --- Load Legislator Names for Searching ---
-    # Use the processed legislators CSV which should be more stable
-    legislators_file = paths['processed'] / 'legislators_ID.csv' # Assumes state is 'ID'
+    legislators_file = paths['processed'] / 'legislators_ID.csv'
     if not legislators_file.is_file():
         logger.error(f"Processed legislators file not found: {legislators_file}")
         logger.error("Ensure LegiScan data (including legislators) has been collected and processed first.")
         return None
 
     try:
-        # Load only necessary columns: 'name' (for searching), potentially 'legislator_id' (for linking later)
-        legislators_df = pd.read_csv(legislators_file, usecols=['name']) # Add 'legislator_id' if needed
+        # Load only necessary columns
+        legislators_df = pd.read_csv(legislators_file, usecols=['name'])
         # Drop rows with missing names, get unique names
         search_targets = legislators_df['name'].dropna().unique().tolist()
         logger.info(f"Loaded {len(search_targets)} unique legislator names to search for from {legislators_file.name}.")
@@ -646,12 +650,17 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
         logger.error(f"Error reading legislators file {legislators_file}: {e}", exc_info=True)
         return None
 
+    # --- Create necessary directories ---
+    # Ensure raw campaign finance directory exists
+    if 'raw_campaign_finance' not in paths:
+        paths['raw_campaign_finance'] = paths['raw'] / 'campaign_finance'
+        paths['raw_campaign_finance'].mkdir(parents=True, exist_ok=True)
+
     # --- Iterate and Scrape ---
-    all_finance_data_dfs: List[pd.DataFrame] = [] # Explicitly type list
+    all_finance_data_dfs: List[pd.DataFrame] = []
     search_attempts = 0
-    download_links_found = 0
     download_successes = 0
-    download_failures = 0 # Includes failed downloads and empty/failed processing
+    download_failures = 0
 
     years_to_process = list(range(start_year, end_year + 1))
     # Use nested tqdm for better progress visibility
@@ -665,69 +674,56 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
                 logger.debug(f"Attempting search: Type={data_type}, Target='{target_name}', Year={year}")
 
                 # Polite wait before initiating search
-                time.sleep(random.uniform(0.6, ID_FINANCE_DOWNLOAD_WAIT_SECONDS + 0.5)) # Slightly longer base wait
+                time.sleep(random.uniform(0.6, ID_FINANCE_DOWNLOAD_WAIT_SECONDS + 0.5))
 
                 try:
-                    # Call the search function to get the download URL
-                    # Pass the 'paths' dict needed for saving debug files if link not found
-                    download_link = search_for_finance_data_link(target_name, year, data_type, paths)
+                    # Call the Playwright search function
+                    search_result = search_with_playwright(target_name, year, data_type, paths)
 
-                    if download_link:
-                        download_links_found += 1
-                        # Wait a bit more before hitting the download link itself
-                        time.sleep(random.uniform(0.8, ID_FINANCE_DOWNLOAD_WAIT_SECONDS + 1.0))
-
-                        # Download and process the data file
+                    if search_result:
+                        download_path, data_df = search_result
+                        logger.info(f"Successfully downloaded data for {data_type}, '{target_name}', {year}")
+                        
+                        # Process the downloaded data
                         df_processed = download_and_extract_finance_data(
-                            download_link, target_name, year, data_type, paths
+                            download_path, data_df, target_name, year, data_type, paths
                         )
 
                         if df_processed is not None and not df_processed.empty:
                             all_finance_data_dfs.append(df_processed)
                             download_successes += 1
-                        elif df_processed is None:
-                            # download_and_extract handles logging errors
-                            logger.warning(f"Download/processing failed for {data_type}, '{target_name}', {year}. Link: {download_link}")
+                        else:
+                            logger.warning(f"Processing failed for {data_type}, '{target_name}', {year}")
                             download_failures += 1
-                        else: # df_processed is an empty DataFrame
-                            logger.info(f"Processing resulted in empty data for {data_type}, '{target_name}', {year}. Link: {download_link}")
-                            # Don't count as failure, but maybe track separately?
-                            # download_failures += 1 # Option: count empty files as failures
                     else:
-                         # search_for_finance_data_link handles logging reasons for no link
-                         logger.debug(f"No download link found for {data_type}, '{target_name}', {year}.")
-                         # Not a download failure, just no link found/no data reported
+                         logger.debug(f"No data found for {data_type}, '{target_name}', {year}")
+                         # Not a download failure, just no data reported
 
                 except Exception as e_scrape_loop:
-                     # Catch unexpected errors in the main loop iteration
                      logger.error(f"Unhandled error during scrape loop for {data_type}, '{target_name}', {year}: {e_scrape_loop}", exc_info=True)
-                     download_failures += 1 # Count errors as failures
+                     download_failures += 1
+                
+                # Small delay between searches
+                time.sleep(random.uniform(0.2, 0.6))
 
-                # Small delay between contribution/expenditure searches for the same target/year
-                # time.sleep(random.uniform(0.2, 0.6)) # Reduced slightly as waits are within loop
-
-            # Wait a bit longer between different legislators/committees within the same year
-            # time.sleep(random.uniform(0.5, 1.5)) # Reduced slightly
+            # Wait a bit longer between different legislators/committees
+            time.sleep(random.uniform(0.5, 1.5))
 
     # --- Consolidate and Save Results ---
     logger.info(f"--- Idaho Finance Scraping Finished ({start_year}-{end_year}) ---")
     logger.info(f"Total search attempts (Target*Year*Type): {search_attempts}")
-    logger.info(f"Download links found: {download_links_found}")
     logger.info(f"Successful data extractions (non-empty): {download_successes}")
-    logger.info(f"Failed/empty downloads or processing errors: {download_failures}")
+    logger.info(f"Failed downloads or processing errors: {download_failures}")
 
     if not all_finance_data_dfs:
         logger.warning("No campaign finance data was successfully collected or extracted.")
-        # Create empty placeholder file? Or just return None? Returning None seems cleaner.
-        return None # Return None if nothing was collected
+        return None
 
     final_output_path: Optional[Path] = None
     try:
         # Concatenate all collected DataFrames
         logger.info(f"Consolidating {len(all_finance_data_dfs)} collected finance dataframes...")
-        # Use sort=False to prevent pandas from sorting columns alphabetically
-        # Use join='outer' if schemas might slightly differ (though standardize_columns aims to prevent this)
-        consolidated_df = pd.concat(all_finance_data_dfs, ignore_index=True, sort=False) #, join='outer' )
+        consolidated_df = pd.concat(all_finance_data_dfs, ignore_index=True, sort=False)
         total_records = len(consolidated_df)
         logger.info(f"Consolidated a total of {total_records} finance records.")
 
@@ -736,21 +732,16 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
              return None
 
         # Define output file path in the 'processed' directory
-        # Include state and year range in filename for consistency with data_collection.py
         output_filename = f'finance_ID_consolidated_{start_year}-{end_year}.csv'
         output_file = paths['processed'] / output_filename
 
-        # Save the consolidated data using utils.convert_to_csv
-        # convert_to_csv expects a list of dicts
-        # Convert pd.NA to None for broader compatibility if saving JSON later, but fine for CSV.
-        # Using df.where(pd.notna(df), None) is safer than fillna(None)
-        # records_list = consolidated_df.where(pd.notna(consolidated_df), None).to_dict('records')
-        records_list = consolidated_df.to_dict('records') # Keep pd.NA for CSV saving consistency
+        # Save the consolidated data
+        records_list = consolidated_df.to_dict('records')
 
-        # Define expected columns for the final CSV based on combined maps + metadata
+        # Define expected columns for the final CSV
         final_columns = sorted(list(
-            set(CONTRIBUTION_COLUMN_MAP.keys()) |
-            set(EXPENDITURE_COLUMN_MAP.keys()) |
+            set(CONTRIBUTION_COLUMN_MAP.values()) |
+            set(EXPENDITURE_COLUMN_MAP.values()) |
             {'source_search_term', 'data_source_url', 'scrape_year', 'raw_file_path', 'scrape_timestamp', 'data_type'}
         ))
 
@@ -758,73 +749,67 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
 
         if num_saved == total_records:
             logger.info(f"Successfully saved {num_saved} consolidated finance records to: {output_file}")
-            final_output_path = output_file # Store path to return
+            final_output_path = output_file
         else:
-            # convert_to_csv logs errors internally
-            logger.error(f"Mismatch saving consolidated data via convert_to_csv. Expected {total_records}, reported save count {num_saved}. Check logs and output file: {output_file}")
-            # Return path if file exists, otherwise None
+            logger.error(f"Mismatch saving consolidated data. Expected {total_records}, saved {num_saved}. Check logs and output file: {output_file}")
             final_output_path = output_file if output_file.exists() else None
 
     except pd.errors.InvalidIndexError as e_concat_cols:
-        logger.error(f"Error during concatenation, likely due to duplicate column names before standardization: {e_concat_cols}", exc_info=True)
+        logger.error(f"Error during concatenation, likely due to duplicate column names: {e_concat_cols}", exc_info=True)
     except Exception as e_concat:
         logger.error(f"Error consolidating or saving final finance data: {e_concat}", exc_info=True)
 
     return final_output_path
 
-
 # --- Main Execution Block (for standalone testing) ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Scrape campaign finance data from Idaho Secretary of State website (Sunshine Portal).",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter # Show defaults
+        description="Scrape campaign finance data from Idaho Secretary of State website (Sunshine Portal) using Playwright.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument('--start-year', type=int, default=None, # Default handled in run_finance_scrape
+    parser.add_argument('--start-year', type=int, default=None,
                         help='Start year for data collection (default: current year)')
-    parser.add_argument('--end-year', type=int, default=None, # Default handled in run_finance_scrape
+    parser.add_argument('--end-year', type=int, default=None,
                         help='End year for data collection (default: current year)')
     parser.add_argument('--data-dir', type=str, default=None,
                         help='Override base data directory (default: ./data from config/utils)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Run browser in headful mode for debugging')
 
     args = parser.parse_args()
 
     # --- Standalone Setup ---
-    # Setup paths early to ensure log directory exists if overridden
-    # Use try-except for path setup as it can exit
     try:
         paths = setup_project_paths(args.data_dir)
-    except SystemExit: # Catch sys.exit called by setup_project_paths on critical error
-        # Error logged by setup_project_paths
-        sys.exit(1) # Exit script
+    except SystemExit:
+        sys.exit(1)
 
-    # Setup logging specifically for this standalone run
-    # Pass the configured paths to ensure logs go to the correct place
+    # Setup logging
     logger = setup_logging(FINANCE_SCRAPE_LOG_FILE, paths['log'])
 
     # --- Run the main scraping logic ---
     final_output = None
     try:
-        # Pass arguments directly to the main logic function
         final_output = run_finance_scrape(
             start_year=args.start_year,
             end_year=args.end_year,
-            data_dir=paths['base'] # Pass the resolved base path
+            data_dir=paths['base']
         )
 
         if final_output and final_output.exists():
             print(f"\nFinance scraping finished successfully.")
             print(f"Output file: {final_output}")
-            exit_code = 0 # Success
+            exit_code = 0
         elif final_output:
             print(f"\nFinance scraping finished, but the expected output file was not found: {final_output}")
-            exit_code = 1 # Failure state
+            exit_code = 1
         else:
             print("\nFinance scraping finished but produced no output or encountered errors.")
-            exit_code = 1 # Failure state
+            exit_code = 1
 
     except Exception as e:
         logger.critical(f"Critical unhandled error during standalone finance scraping execution: {e}", exc_info=True)
-        exit_code = 2 # Critical failure
+        exit_code = 2
     finally:
-        logging.shutdown() # Ensure all logs are flushed before exiting
+        logging.shutdown()
         sys.exit(exit_code)

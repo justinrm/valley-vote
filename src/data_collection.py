@@ -37,7 +37,11 @@ from .config import (
     ID_COMMITTEE_HEADING_SELECTORS,
     ID_COMMITTEE_CONTENT_SELECTORS,
     DATA_COLLECTION_LOG_FILE,
-    SPONSOR_TYPES # Assuming SPONSOR_TYPES is defined in config
+    # Data Schema Constants needed locally
+    STATUS_CODES,
+    SPONSOR_TYPES,
+    VOTE_TEXT_MAP,
+    # FINANCE_COLUMN_MAPS # Not needed directly by data_collection
 )
 from .utils import (
     setup_logging,
@@ -45,7 +49,8 @@ from .utils import (
     convert_to_csv,
     fetch_page,
     load_json,
-    clean_name
+    clean_name,
+    map_vote_value
 )
 
 # --- Configure Logging ---
@@ -54,56 +59,6 @@ logger = logging.getLogger(Path(DATA_COLLECTION_LOG_FILE).stem)
 # --- Ensure API Key is Set ---
 if not LEGISCAN_API_KEY:
     logger.critical("FATAL: LEGISCAN_API_KEY environment variable not set. API calls will fail.")
-
-# --- Constants & Mappings (from API Manual/Observation) ---
-STATUS_CODES = {
-    0: 'N/A', 1: 'Introduced', 2: 'Engrossed', 3: 'Enrolled', 4: 'Passed',
-    5: 'Vetoed', 6: 'Failed', 7: 'Override', 8: 'Chaptered', 9: 'Refer',
-    10: 'Report Pass', 11: 'Report DNP', 12: 'Draft', 13: 'Committee Process',
-    14: 'Calendars', 15: 'Failed Vote', 16: 'Veto Override Pass', 17: 'Veto Override Fail'
-    # Add more specific codes if observed or needed
-}
-
-# --- Finance Data Column Mappings ---
-# These maps are used by scrape_finance_idaho.py for standardizing column names
-FINANCE_COLUMN_MAPS = {
-    'contributions': {
-        'donor_name': ['donor name', 'contributor name', 'name', 'from', 'contributor'],
-        'contribution_date': ['date', 'contribution date', 'received date'],
-        'contribution_amount': ['amount', 'contribution amount', '$', 'receipt amount'],
-        'donor_address': ['address', 'donor address', 'contributor address', 'addr 1'],
-        'donor_city': ['city', 'donor city', 'contributor city'],
-        'donor_state': ['state', 'st', 'donor state', 'contributor state'],
-        'donor_zip': ['zip', 'zip code', 'donor zip', 'contributor zip'],
-        'donor_employer': ['employer', 'donor employer', 'contributor employer'],
-        'donor_occupation': ['occupation', 'donor occupation', 'contributor occupation'],
-        'contribution_type': ['type', 'contribution type', 'receipt type'],
-        'committee_name': ['committee name', 'recipient committee', 'filer name'],
-        'report_name': ['report name', 'report title', 'report'],
-        'transaction_id': ['transaction id', 'tran id', 'transactionid']
-    },
-    'expenditures': {
-        'expenditure_date': ['date', 'expenditure date', 'payment date'],
-        'payee_name': ['payee', 'paid to', 'name', 'payee name', 'vendor name'],
-        'expenditure_amount': ['amount', 'expenditure amount', '$', 'payment amount'],
-        'expenditure_purpose': ['purpose', 'description', 'expenditure purpose', 'memo'],
-        'payee_address': ['address', 'payee address', 'vendor address', 'addr 1'],
-        'payee_city': ['city', 'payee city', 'vendor city'],
-        'payee_state': ['state', 'st', 'payee state', 'vendor state'],
-        'payee_zip': ['zip', 'zip code', 'payee zip', 'vendor zip'],
-        'expenditure_type': ['type', 'expenditure type', 'payment type', 'expenditure code'],
-        'committee_name': ['committee name', 'paying committee', 'filer name'],
-        'report_name': ['report name', 'report title', 'report'],
-        'transaction_id': ['transaction id', 'tran id', 'transactionid']
-    }
-}
-
-VOTE_TEXT_MAP = {
-    'yea': 1, 'aye': 1, 'yes': 1, 'pass': 1, 'y': 1,
-    'nay': 0, 'no': 0, 'fail': 0, 'n': 0,
-    'not voting': -1, 'abstain': -1, 'present': -1, 'nv': -1, 'av': -1,
-    'absent': -2, 'excused': -2, 'abs': -2, 'exc': -2,
-}
 
 # --- Custom Exceptions ---
 class APIRateLimitError(Exception):
@@ -618,14 +573,6 @@ def collect_committee_definitions(session: Dict[str, Any], paths: Dict[str, Path
         logger.warning(f"No valid committee definitions collected for session {session_id} ({year})")
     # Save the processed list (even if empty)
     save_json(processed_committees, session_committees_json_path)
-
-
-def map_vote_value(vote_text: Optional[str]) -> int:
-    """Map vote text to numeric values (1: Yea, 0: Nay, -1: Abstain/Present/NV, -2: Absent/Excused, -9: Other/Unknown)."""
-    if vote_text is None: return -9
-    # Standardize by lowercasing and stripping whitespace
-    vt = str(vote_text).strip().lower()
-    return VOTE_TEXT_MAP.get(vt, -9) # Default to -9 if not found in map
 
 
 def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path], fetch_flags: Optional[Dict[str, bool]] = None):
@@ -1835,25 +1782,26 @@ def collect_election_history(state_abbr: str, years: Iterable[int], paths: Dict[
 
 # --- Main Execution Block (for standalone testing) ---
 if __name__ == "__main__":
-    # This block allows testing parts of data_collection.py directly.
-    # It sets up basic logging and path handling for the test run.
+    # Setup paths and logging using utils
+    from .utils import setup_project_paths # Local import for standalone run
+    # Need to handle potential base_dir override if argparse is kept complex
+    # Simplified for now:
+    paths = setup_project_paths() # Use default base dir 'data'
+    # Use the central util to set up logging for this module
+    test_logger = setup_logging(DATA_COLLECTION_LOG_FILE, log_dir=paths['log'])
+
     parser = argparse.ArgumentParser(description="LegiScan & Scraper Data Collection Module Runner")
     parser.add_argument('--state', type=str.upper, default='ID', help='State abbreviation')
     parser.add_argument('--start-year', type=int, default=datetime.now().year - 1, help='Start year')
     parser.add_argument('--end-year', type=int, default=datetime.now().year, help='End year')
-    parser.add_argument('--data-dir', type=str, default=None, help='Override base data directory')
+    # Removed --data-dir as setup_project_paths is simplified here
+    # parser.add_argument('--data-dir', type=str, default=None, help='Override base data directory')
     parser.add_argument('--run', type=str, choices=['sessions', 'legislators', 'committees', 'bills', 'scrape_members', 'match_members', 'consolidate_api', 'consolidate_members'], required=True, help='Specific function group to run')
     parser.add_argument('--fetch-texts', action='store_true', help='Fetch full bill text documents via API (requires --run bills)')
     parser.add_argument('--fetch-amendments', action='store_true', help='Fetch full bill amendment documents via API (requires --run bills)')
     parser.add_argument('--fetch-supplements', action='store_true', help='Fetch full bill supplement documents via API (requires --run bills)')
 
     args = parser.parse_args()
-
-    # Setup paths and logging for standalone run using utils
-    from .utils import setup_project_paths # Local import for standalone run
-    paths = setup_project_paths(args.data_dir)
-    # Use the central util to set up logging for this module
-    test_logger = setup_logging(DATA_COLLECTION_LOG_FILE, paths['log'])
 
     # --- Validate API Key for API-dependent actions ---
     api_actions = ['sessions', 'legislators', 'committees', 'bills', 'consolidate_api']
@@ -1868,15 +1816,13 @@ if __name__ == "__main__":
     sessions = []
 
     # Fetch sessions if needed by the requested action
-    # Exclude actions that don't need session list first
     if args.run not in ['scrape_members', 'match_members', 'consolidate_members']:
         sessions = get_session_list(args.state, years, paths)
-        if not sessions and args.run != 'sessions':  # Allow 'sessions' run to finish if none found
+        if not sessions and args.run != 'sessions':
             test_logger.error("No relevant sessions found via API. Halting API-dependent actions.")
             sys.exit(1)
         if args.run == 'sessions':
             test_logger.info(f"Fetched {len(sessions)} sessions.")
-            # Exit after fetching sessions if that was the only action requested
             logging.shutdown()
             sys.exit(0)
 
@@ -1963,3 +1909,47 @@ if __name__ == "__main__":
 
     test_logger.info(f"--- Standalone run for action '{args.run}' finished. ---")
     logging.shutdown()  # Ensure logs are flushed before exit
+
+# Define finance data column mappings
+# Dictionary of standard finance columns and their possible variations
+FINANCE_COLUMN_MAPS = {
+    'contributions': {
+        'Transaction ID': 'transaction_id',
+        'Transaction Date': 'contribution_date',
+        'Date': 'contribution_date',
+        'Contributor': 'contributor_name',
+        'Contributor Name': 'contributor_name',
+        'Donor': 'contributor_name',
+        'Contributor Address': 'contributor_address',
+        'Address': 'contributor_address',
+        'Amount': 'contribution_amount',
+        'Contribution Amount': 'contribution_amount',
+        'Recipient': 'recipient_name',
+        'Committee': 'recipient_name',
+        'Recipient Name': 'recipient_name',
+        'Report Name': 'report_name',
+        'Report': 'report_name',
+        'Employer': 'employer',
+        'Occupation': 'occupation',
+    },
+    'expenditures': {
+        'Transaction ID': 'transaction_id',
+        'Transaction Date': 'expenditure_date',
+        'Date': 'expenditure_date',
+        'Payee': 'payee_name',
+        'Vendor': 'payee_name',
+        'Recipient': 'payee_name',
+        'Payee Name': 'payee_name',
+        'Payee Address': 'payee_address',
+        'Address': 'payee_address',
+        'Amount': 'expenditure_amount',
+        'Expenditure Amount': 'expenditure_amount',
+        'Committee Name': 'committee_name',
+        'Committee': 'committee_name',
+        'Spender': 'committee_name',
+        'Purpose': 'expenditure_purpose',
+        'Expenditure Purpose': 'expenditure_purpose',
+        'Report Name': 'report_name',
+        'Report': 'report_name',
+    }
+}

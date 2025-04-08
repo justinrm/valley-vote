@@ -37,7 +37,7 @@ This project starts with Idaho as a case study, with the potential to expand to 
 *   **Campaign Finance Data Acquisition (Idaho SOS Sunshine Portal):**
     *   Uses **Playwright** for robust browser automation to handle the dynamic JavaScript-heavy website.
     *   Includes validation scripts (`test_finance_scraper.py`) for testing scraping functionality.
-    *   *(Currently paused pending manual data acquisition via records request, as automated scraping proved challenging).*
+    *   **Status: Paused.** Automated scraping via Playwright proved challenging and is currently paused. The project is pivoting to using manually acquired data obtained via public records requests. The Playwright scripts are retained for reference.
 
 **Planned:**
 
@@ -110,10 +110,11 @@ This project starts with Idaho as a case study, with the potential to expand to 
 │   ├── main.py                 # Main script orchestrator
 │   ├── match_finance_to_leg.py # Matches finance data (if available)
 │   ├── monitor_idaho_structure.py # Monitors website structure
-│   ├── scrape_finance_idaho.py # Scrapes Idaho finance portal (Uses Playwright - PAUSED)
+│   ├── scrape_finance_idaho.py # Scrapes Idaho finance portal (Uses Playwright - CURRENTLY PAUSED)
 │   ├── test_finance_scraper.py # Playwright-based validation for finance scraper
 │   ├── validate_csv_parsing.py # Validates finance CSV structure
 │   ├── validate_link_finding.py # (Potentially deprecated)
+│   ├── parse_finance_idaho_manual.py # (Planned/Skeleton) Parses manually acquired finance data
 │   ├── utils.py                # Common utilities (logging, name cleaning, etc.)
 │   ├── data_preprocessing.py   # (Planned)
 │   ├── xgboost_model.py        # (Planned)
@@ -217,9 +218,9 @@ python -m src.data_collection --state ID --run scrape_members
 python -m src.data_collection --state ID --run match_members
 
 # Finance Scraper Validation (Primarily for development/debugging):
-# Note: These interact with the live Sunshine Portal.
-# python -m src.test_finance_scraper --inspect-form
-# python -m src.test_finance_scraper --inspect-results
+# Note: These interact with the live Sunshine Portal and test the PAUSED automated scraper.
+# python -m src.test_finance_scraper --inspect-form      # For debugging the form interaction
+# python -m src.test_finance_scraper --inspect-results    # For debugging results page interaction
 ```
 
 ## (Planned) Preprocessing & Modeling:
@@ -238,7 +239,9 @@ Usage instructions will be added once `data_preprocessing.py` and `xgboost_model
     *   Automated Idaho campaign finance scraping via Playwright (pending manual data acquisition).
 *   **Next Steps / Planned:**
     *   Implement caching for API calls (`requests-cache`).
-    *   Acquire and parse Idaho campaign finance data (manual source).
+    *   Acquire Idaho campaign finance data (manual source).
+    *   Flesh out and implement parser for manual finance data (`parse_finance_idaho_manual.py` skeleton created).
+    *   Refine finance-to-legislator matching based on manual data format.
     *   Develop parsers for other data sources (demographics, elections).
     *   Implement data preprocessing and feature engineering (`data_preprocessing.py`).
     *   Develop and train predictive models (`xgboost_model.py`).

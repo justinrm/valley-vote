@@ -3,23 +3,19 @@
 
 This script serves as the primary data acquisition tool for the Valley Vote project, focusing on fetching core legislative information from the LegiScan API. It also includes state-specific web scraping capabilities (currently implemented only for Idaho committee memberships) and functionality to match names from scraped data to official legislator records using fuzzy matching.
 
-## The script fetches information about:
+## The script fetches information about (via LegiScan API):
 
-Legislative Sessions
+*   Legislative Sessions (`getSessionList`)
+*   Legislator Profiles (`getSessionPeople`)
+*   Committee Definitions (`getCommittee`)
+*   Bills (Master List via `getMasterListRaw`, Details via `getBill`)
+*   Bill Sponsors (extracted from `getBill`)
+*   Roll Call Votes (Stubs from `getBill`, Details via `getRollCall`)
+*   Full Bill Texts, Amendments, and Supplements (Optional via `--fetch-*` flags, using `getText`, `getAmendment`, `getSupplement`)
 
-Legislator Profiles (via getSessionPeople)
+It saves raw data responses (primarily JSON) for auditability and processes/consolidates this information into structured yearly files (JSON/CSV) suitable for downstream analysis and model training.
 
-Committee Definitions (via getCommittee)
-
-Bills (Master List via getMasterList, Details via getBill)
-
-Bill Sponsors (extracted from getBill)
-
-Roll Call Votes (Stubs from getBill, Details via getRollCall)
-
-It saves raw data responses (primarily JSON) for auditability and processes/consolidates this information into structured yearly CSV files suitable for downstream analysis and model training.
-
-Crucially, this script includes non-functional stub functions as placeholders for collecting additional complex data sources (Campaign Finance, District Demographics, Election History). The intention is for these sources to be handled by separate, dedicated scripts (like the provided scrape_finance_idaho.py for campaign finance) due to their unique complexities (e.g., state-specific portals, GIS processing, diverse file formats).
+**Note on External Data Sources:** While this script handles core LegiScan data and Idaho committee scraping, other complex data sources (Campaign Finance, District Demographics, Election History) are intended to be collected and processed by **separate, dedicated scripts**. This script includes non-functional *stub functions* as placeholders and integration points for these external sources. For example, Idaho campaign finance data collection is currently paused for automated scraping (`scrape_finance_idaho.py`) and relies on manual acquisition and a separate parsing script (`parse_finance_idaho_manual.py`).
 
 Features
 
@@ -35,7 +31,15 @@ getMasterList: Gets the list of bills for a session.
 
 getBill: Retrieves detailed information for a specific bill, including sponsors, vote stubs, text/amendment/supplement stubs, subjects, and history.
 
+*   Efficient Bill Fetching: Uses `getMasterListRaw` and compares `change_hash` values to fetch details (`getBill`) only for new or updated bills, reducing API calls.
+
 getRollCall: Fetches detailed vote results (including individual legislator votes) for a specific vote ID.
+
+getText: Fetches the full text content of a specific bill document version.
+
+getAmendment: Fetches the full text content of a specific bill amendment.
+
+getSupplement: Fetches the full text content of a specific bill supplement (e.g., fiscal note).
 
 Robust Fetching & Error Handling:
 
@@ -78,6 +82,8 @@ Accepts command-line arguments to specify state, year range, skip specific colle
 Logging: Provides informative logging to both the console and a data_collection.log file (overwritten each run).
 
 Extensibility Stubs: Includes placeholder functions (collect_campaign_finance, collect_district_demographics, collect_election_history) that log warnings. These explicitly indicate where integration points for separate collection scripts exist.
+
+Document Fetching Flags: Includes `--fetch-texts`, `--fetch-amendments`, `--fetch-supplements` flags to enable fetching the full content of these documents via the API during the `run_api` step.
 
 Dependencies
 
@@ -124,6 +130,12 @@ Command-Line Arguments:
 
 --data-dir PATH: Override the base data directory (default: ./data). All raw/ and processed/ subdirectories will be relative to this path.
 
+--fetch-texts: Fetch full bill text documents via API (requires extra API calls).
+
+--fetch-amendments: Fetch full amendment documents via API (requires extra API calls).
+
+--fetch-supplements: Fetch full supplement documents via API (requires extra API calls).
+
 Directory Structure
 
 The script creates and uses the following directory structure within the specified base data directory (default is ./data/):
@@ -139,9 +151,9 @@ The script creates and uses the following directory structure within the specifi
 │   ├── campaign_finance/ # (Stub) Placeholder created; data intended to be populated by separate script(s)
 │   ├── demographics/     # (Stub) Placeholder created; data intended to be populated by separate script(s)
 │   ├── elections/        # (Stub) Placeholder created; data intended to be populated by separate script(s)
-│   ├── texts/            # (Directory created, but script currently only stores text *stubs* within bill data)
-│   ├── amendments/       # (Directory created, but script currently only stores amendment *stubs* within bill data)
-│   └── supplements/      # (Directory created, but script currently only stores supplement *stubs* within bill data)
+│   ├── texts/            # Raw JSON documents if fetched via --fetch-texts (e.g., text_{doc_id}.json)
+│   ├── amendments/       # Raw JSON documents if fetched via --fetch-amendments (e.g., amendment_{doc_id}.json)
+│   └── supplements/      # Raw JSON documents if fetched via --fetch-supplements (e.g., supplement_{doc_id}.json)
 │
 └── processed/
     ├── legislators_{state}.csv                     # Consolidated unique legislators across all specified sessions
@@ -169,13 +181,17 @@ Collects unique legislators across all identified sessions (getSessionPeople) an
 
 Iterates through each relevant session:
 
+Collects session details (e.g., using `getDataset` for session info if needed, though typically derived from `getSessionList`).
+
 Collects committee definitions (getCommittee).
 
 Collects master bill list (getMasterList).
 
-For each bill in the master list: Fetches detailed bill data (getBill), extracts bill info, sponsor records, vote stubs, text/amendment/supplement stubs.
+For each bill in the master list: Compares `change_hash` to previously stored value (if any). If different or new, fetches detailed bill data (`getBill`), extracts bill info, sponsor records, vote stubs, text/amendment/supplement stubs.
 
 For each vote stub identified: Fetches detailed roll call data (getRollCall) and extracts individual legislator vote records.
+
+If `--fetch-*` flags are used: For each text, amendment, or supplement stub identified in `getBill`, fetches the full document content (`getText`, `getAmendment`, `getSupplement`) and saves it to the corresponding `raw/texts/`, `raw/amendments/`, or `raw/supplements/` directory.
 
 Saves raw JSONs for individual items (legislators, bills, votes, committees) and session-level JSON summaries in the raw/ subdirectories.
 
@@ -239,6 +255,8 @@ This script includes non-functional placeholders for collecting additional data 
 
 collect_campaign_finance() (--collect-finance): Intended to collect donation data. Requires a separate, dedicated script like scrape_finance_idaho.py (provided as an example) to handle the complexities of state-specific campaign finance portals (e.g., Idaho Sunshine Portal).
 
+*Note: Automated scraping via `scrape_finance_idaho.py` is currently PAUSED due to website complexity. The project relies on manual data acquisition and parsing via `parse_finance_idaho_manual.py` (planned).*
+
 collect_district_demographics() (--collect-demographics): Intended to process Census data (ACS) and TIGER/Line shapefiles. Requires a separate script utilizing geospatial libraries (like geopandas).
 
 collect_election_history() (--collect-elections): Intended to parse state election result files (often PDFs or specific formats). Requires a separate script with custom parsing logic for the target state's files.
@@ -260,6 +278,9 @@ Usage Examples
 
 # Collect data for Idaho for years 2022-2024, including scraping & matching for current year
 python data_collection.py --state ID --start-year 2022 --end-year 2024
+
+# Collect data for Idaho for 2023, AND fetch full text documents
+python data_collection.py --state ID --start-year 2023 --end-year 2023 --fetch-texts
 
 # Collect data for California for 2023 only (scraping/matching not implemented for CA, so effectively skipped)
 python data_collection.py --state CA --start-year 2023 --end-year 2023

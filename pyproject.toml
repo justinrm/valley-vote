@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+pythonpath = [
+  "." # Add project root to pythonpath
+] 
