@@ -10,6 +10,7 @@ import argparse
 import csv
 import io
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -18,8 +19,7 @@ import pandas as pd
 import chardet
 
 from src.config import (
-    CONTRIBUTION_COLUMN_MAP,
-    EXPENDITURE_COLUMN_MAP
+    FINANCE_COLUMN_MAPS
 )
 from src.utils import setup_logging, setup_project_paths
 from src.scrape_finance_idaho import standardize_columns
@@ -203,7 +203,7 @@ def suggest_column_mapping(df: pd.DataFrame, data_type: str) -> Dict[str, List[s
     logger.info(f"Suggesting column mapping for {data_type}")
     
     # Get existing column map
-    existing_map = CONTRIBUTION_COLUMN_MAP if data_type == 'contributions' else EXPENDITURE_COLUMN_MAP
+    existing_map = FINANCE_COLUMN_MAPS[data_type]
     
     # Create a new mapping
     suggested_map = {}
@@ -279,7 +279,7 @@ def main() -> int:
     analyze_csv_structure(df, args.file)
     
     # Test column mapping
-    column_map = CONTRIBUTION_COLUMN_MAP if args.data_type == 'contributions' else EXPENDITURE_COLUMN_MAP
+    column_map = FINANCE_COLUMN_MAPS[args.data_type]
     df_standardized = test_column_mapping(df, column_map, args.data_type)
     
     # Suggest column mapping if requested
@@ -296,7 +296,6 @@ def main() -> int:
     return 0
 
 if __name__ == "__main__":
-    import re
     import json
     
     sys.exit(main()) 

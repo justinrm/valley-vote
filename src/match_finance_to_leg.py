@@ -11,7 +11,8 @@ from tqdm import tqdm
 from src.utils import setup_logging, setup_project_paths, clean_name
 
 # --- Configure Logging ---
-logger = setup_logging('match_finance_to_leg.log')
+paths = setup_project_paths()
+logger = setup_logging('match_finance_to_leg.log', paths['log'])
 
 # --- Configuration ---
 DEFAULT_MATCH_THRESHOLD = 88

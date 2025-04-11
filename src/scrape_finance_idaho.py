@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Union, Any, Tuple
 from urllib.parse import urljoin, urlparse
 import io
 import sys
+import shutil
 
 # Third-party imports
 import requests
@@ -99,16 +100,23 @@ def search_with_playwright(
     search_term: str,
     year: int,
     data_type: str,
-    paths: Dict[str, Path]
+    paths: Dict[str, Path],
+    max_retries: int = 3,
+    custom_timeout_ms: int = 90000,
+    debug_mode: bool = False
 ) -> Optional[Tuple[str, pd.DataFrame]]:
     """
     Uses Playwright to search for finance data and return the export URL and possibly data.
+    Optimized for reliability with retries and improved error handling.
     
     Args:
         search_term: Name of legislator or committee.
         year: Election year or reporting year.
         data_type: 'contributions' or 'expenditures'.
         paths: Project paths dictionary.
+        max_retries: Maximum number of retry attempts for failed operations.
+        custom_timeout_ms: Custom timeout in milliseconds for critical operations.
+        debug_mode: Whether to run browser in headful mode for debugging.
         
     Returns:
         Optional tuple of (export_url, data_frame).
@@ -127,228 +135,324 @@ def search_with_playwright(
     start_date = f"01/01/{year}"
     end_date = f"12/31/{year}"
     
+    # Create artifacts directory for debug files
+    artifacts_dir = paths['base'] / 'artifacts' if 'artifacts' not in paths else paths['artifacts']
+    debug_path = artifacts_dir / 'debug'
+    debug_path.mkdir(parents=True, exist_ok=True)
+    
+    # Use a single Playwright browser instance for all retries
     with sync_playwright() as p:
         browser = None
-        try:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                accept_downloads=True,  # Important for handling file downloads
-                viewport={'width': 1280, 'height': 1024}
-            )
-            page = context.new_page()
+        attempts = 0
+        while attempts < max_retries:
+            attempts += 1
+            logger.info(f"Search attempt {attempts}/{max_retries} for '{search_term}', {year}, {data_type}")
             
-            # Navigate to search page
-            if not safe_goto(page, ID_FINANCE_BASE_URL, timeout_ms=60000):
-                logger.error(f"Failed to load search page: {ID_FINANCE_BASE_URL}")
-                return None
-            
-            logger.info("Search page loaded. Waiting for dynamic content...")
-            page.wait_for_timeout(3000)
-            
-            # --- Fill search form ---
             try:
-                # Locate and fill name input
-                logger.info(f"Looking for name search input field...")
-                name_input = page.locator(name_input_selector).first
-                name_input.wait_for(state='attached', timeout=15000)
-                
-                # Focus and fill name input
-                logger.info(f"Filling search term: '{search_term}'")
-                try:
-                    name_input.focus(timeout=5000)
-                    page.wait_for_timeout(500)
-                except PlaywrightTimeoutError:
-                    # Try JavaScript focus as a fallback
-                    input_id = name_input.get_attribute('id')
-                    if input_id:
-                        page.evaluate(f"document.querySelector('#{input_id}').focus()")
-                        page.wait_for_timeout(500)
-                    else:
-                        logger.error("Could not focus name input field")
-                        return None
-                
-                # Type name and select first option
-                name_input.fill(search_term, timeout=10000)
-                page.wait_for_timeout(1000)
-                
-                # Try to click the dropdown option that appears
-                option_selector = 'div[id*="react-select-"][class*="-option"]'
-                first_option = page.locator(option_selector).first
-                try:
-                    first_option.wait_for(state='visible', timeout=5000)
-                    first_option.click(timeout=5000)
-                    page.wait_for_timeout(500)
-                except PlaywrightTimeoutError:
-                    logger.warning(f"No dropdown options appeared for '{search_term}'. Will try to proceed.")
-                    # Press Enter as a fallback
-                    name_input.press('Enter')
-                    page.wait_for_timeout(500)
-                
-                # Fill date range inputs
-                logger.info(f"Setting date range: {start_date} to {end_date}")
-                date_inputs = page.locator(date_input_selector)
-                if date_inputs.count() >= 2:
-                    start_date_input = date_inputs.nth(0)
-                    end_date_input = date_inputs.nth(1)
-                    
-                    start_date_input.fill(start_date, timeout=5000)
-                    end_date_input.fill(end_date, timeout=5000)
-                    page.wait_for_timeout(500)
-                else:
-                    logger.warning("Could not find both date inputs. Proceeding with default date range.")
-                
-                # Submit search
-                logger.info("Submitting search...")
-                search_button = page.locator(search_button_selector).first
-                search_button.click(timeout=10000)
-                
-                # Wait for results to appear
-                logger.info("Waiting for search results...")
-                try:
-                    page.locator(results_grid_indicator_selector).first.wait_for(
-                        state='visible', timeout=45000
+                # Launch browser with optimized settings
+                if browser is None:
+                    browser = p.chromium.launch(
+                        headless=not debug_mode,  # Use headful mode if debug_mode is True
+                        args=['--disable-dev-shm-usage', '--no-sandbox', '--disable-setuid-sandbox']
                     )
-                    logger.info("Search results appeared.")
-                    page.wait_for_timeout(2000)  # Let the grid stabilize
                     
-                    # Check for "no results" message
-                    no_results_selector = 'div:has-text("No records found"), div:has-text("No results")'
-                    if page.locator(no_results_selector).count() > 0:
-                        logger.info(f"Search successful but returned 'No Records Found' for '{search_term}', {year}.")
-                        return None
+                # Create a new context with optimized settings for each attempt
+                context = browser.new_context(
+                    accept_downloads=True,
+                    viewport={'width': 1280, 'height': 1024},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                )
+                page = context.new_page()
+                
+                # Configure longer timeout for navigation
+                page.set_default_timeout(custom_timeout_ms)
+                
+                # Add event listeners for console messages to help with debugging
+                page.on("console", lambda msg: logger.debug(f"Browser console {msg.type}: {msg.text}"))
+                
+                # Navigate to search page with custom timeout and retry handling
+                logger.info(f"Navigating to {ID_FINANCE_BASE_URL}")
+                try:
+                    response = page.goto(
+                        ID_FINANCE_BASE_URL, 
+                        wait_until='domcontentloaded', 
+                        timeout=custom_timeout_ms
+                    )
+                    if response and not response.ok:
+                        logger.error(f"Page load failed: Status: {response.status}")
+                        save_debug_html(page, f"page_load_error_{data_type}_{year}_attempt{attempts}", paths)
+                        raise PlaywrightTimeoutError(f"Bad response status: {response.status}")
                     
-                    # Look for export button
-                    logger.info("Looking for export button...")
-                    export_button = page.locator(export_button_selector).first
+                    # Wait for page to stabilize
+                    logger.info("Search page loaded. Waiting for dynamic content...")
+                    page.wait_for_load_state('networkidle', timeout=30000)
+                    page.wait_for_timeout(3000) # Let JS initialize
+                    
+                    # --- Fill search form ---
+                    logger.info(f"Looking for name search input field...")
+                    name_input = page.locator(name_input_selector).first
+                    
+                    # Wait for input field with increased timeout
                     try:
-                        export_button.wait_for(state='visible', timeout=20000)
-                        
-                        # Setup download listener
-                        logger.info("Setting up download listener...")
-                        download_path = None
-                        with page.expect_download(timeout=60000) as download_info:
-                            logger.info("Clicking export button...")
-                            export_button.click(timeout=10000)
-                            
-                            # Wait for download to start
-                            download = download_info.value
-                            logger.info(f"Download started: {download.suggested_filename}")
-                            
-                            # Define download location
-                            raw_dir = paths['raw_campaign_finance'] / 'idaho' / str(year)
-                            raw_dir.mkdir(parents=True, exist_ok=True)
-                            safe_term = "".join(c if c.isalnum() else '_' for c in search_term)[:50].strip('_')
-                            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-                            download_path = raw_dir / f"{data_type}_{safe_term}_{year}_{timestamp}.csv"
-                            
-                            # Save the file
-                            download.save_as(download_path)
-                            logger.info(f"Downloaded file saved to: {download_path}")
-                        
-                        if download_path and download_path.exists():
-                            # Success - read the data
-                            logger.info(f"Reading downloaded data from {download_path}")
-                            try:
-                                df = pd.read_csv(download_path, low_memory=False)
-                                if not df.empty:
-                                    return (str(download_path), df)
-                                else:
-                                    logger.warning(f"Downloaded file is empty: {download_path}")
-                                    return None
-                            except Exception as e_read:
-                                logger.error(f"Error reading downloaded file: {e_read}")
-                                return None
-                        else:
-                            logger.error("Download failed or file not saved properly")
-                            return None
-                            
+                        name_input.wait_for(state='attached', timeout=30000)
                     except PlaywrightTimeoutError:
-                        logger.error("Timeout waiting for export button")
-                        save_debug_html(page, f"export_button_timeout_{data_type}_{year}", paths)
-                        return None
+                        logger.error("Name input field not found - saving debug screenshot")
+                        page.screenshot(path=str(debug_path / f"missing_input_{attempts}.png"))
+                        save_debug_html(page, f"missing_input_{data_type}_{year}_attempt{attempts}", paths)
+                        raise
                     
-                except PlaywrightTimeoutError:
-                    logger.error("Timeout waiting for search results")
-                    save_debug_html(page, f"results_timeout_{data_type}_{year}", paths)
-                    return None
+                    # Focus and fill name input with multiple strategies
+                    logger.info(f"Filling search term: '{search_term}'")
+                    try:
+                        # Try clicking first to activate the field
+                        name_input.click(timeout=10000)
+                        page.wait_for_timeout(500)
+                        name_input.fill(search_term, timeout=10000)
+                    except PlaywrightTimeoutError:
+                        # Try JavaScript as backup strategy
+                        logger.warning("Standard input interaction failed, trying JavaScript approach")
+                        input_id = name_input.get_attribute('id')
+                        if input_id:
+                            # Script to focus and fill the input
+                            page.evaluate(f'''() => {{
+                                const input = document.getElementById('{input_id}');
+                                if (input) {{
+                                    input.focus();
+                                    input.value = '{search_term.replace("'", "\\'")}';
+                                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                }}
+                            }}''')
+                            page.wait_for_timeout(1000)
+                        else:
+                            logger.error("Could not focus name input field")
+                            raise
+                    
+                    # Wait for dropdown options to appear
+                    page.wait_for_timeout(2000)
+                    
+                    # Try to click the dropdown option that appears
+                    option_selector = 'div[id*="react-select-"][class*="-option"]'
+                    option_count = page.locator(option_selector).count()
+                    
+                    if option_count > 0:
+                        logger.info(f"Found {option_count} dropdown options, selecting first")
+                        first_option = page.locator(option_selector).first
+                        first_option.click(timeout=10000)
+                        page.wait_for_timeout(1000)
+                    else:
+                        logger.warning(f"No dropdown options found for '{search_term}', pressing Enter")
+                        name_input.press('Enter')
+                        page.wait_for_timeout(1000)
+                    
+                    # Fill date range inputs
+                    logger.info(f"Setting date range: {start_date} to {end_date}")
+                    date_inputs = page.locator(date_input_selector)
+                    date_input_count = date_inputs.count()
+                    
+                    if date_input_count >= 2:
+                        start_date_input = date_inputs.nth(0)
+                        end_date_input = date_inputs.nth(1)
+                        
+                        # Clear fields first to avoid issues
+                        start_date_input.fill("", timeout=10000)
+                        start_date_input.fill(start_date, timeout=10000)
+                        
+                        end_date_input.fill("", timeout=10000)
+                        end_date_input.fill(end_date, timeout=10000)
+                        page.wait_for_timeout(1000)
+                    else:
+                        logger.warning(f"Expected 2 date inputs, found {date_input_count}. Proceeding anyway.")
+                    
+                    # Submit search
+                    logger.info("Submitting search...")
+                    search_button = page.locator(search_button_selector).first
+                    search_button.click(timeout=20000)
+                    
+                    # Wait for results with progressive approach
+                    logger.info("Waiting for search results...")
+                    try:
+                        # First check for "no results" quickly 
+                        no_results_selector = 'div:has-text("No records found"), div:has-text("No results")'
+                        if page.locator(no_results_selector).count(timeout=10000) > 0:
+                            logger.info(f"Search successful but returned 'No Records Found' for '{search_term}', {year}.")
+                            return None
+                        
+                        # Wait for results grid to appear
+                        page.locator(results_grid_indicator_selector).first.wait_for(
+                            state='visible', timeout=45000
+                        )
+                        logger.info("Search results appeared.")
+                        
+                        # Wait for grid to fully load data
+                        page.wait_for_load_state('networkidle', timeout=20000)
+                        page.wait_for_timeout(2000)  # Let the grid stabilize
+                        
+                        # Look for export button
+                        logger.info("Looking for export button...")
+                        export_button = page.locator(export_button_selector).first
+                        
+                        try:
+                            export_button.wait_for(state='visible', timeout=30000)
+                            
+                            # Setup download listener with improved path handling
+                            logger.info("Setting up download listener...")
+                            with page.expect_download(timeout=90000) as download_info:
+                                # Click with retry if needed
+                                try:
+                                    export_button.click(timeout=15000)
+                                except PlaywrightTimeoutError:
+                                    logger.warning("Export button click failed, trying JavaScript click")
+                                    page.evaluate("document.querySelector('button[title*=\"Export\" i], button:has-text(\"Export to CSV\"), a:has-text(\"Export\")').click()")
+                                
+                                # Wait for download to start
+                                download = download_info.value
+                                logger.info(f"Download started: {download.suggested_filename}")
+                                
+                                # Define download location with safe filename creation
+                                raw_dir = paths['raw_campaign_finance'] / 'idaho' / str(year)
+                                raw_dir.mkdir(parents=True, exist_ok=True)
+                                safe_term = "".join(c if c.isalnum() else '_' for c in search_term)[:50].strip('_')
+                                timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                                download_path = raw_dir / f"{data_type}_{safe_term}_{year}_{timestamp}.csv"
+                                
+                                # Save the file with progress tracking
+                                logger.info(f"Saving download to: {download_path}")
+                                download.save_as(download_path)
+                                logger.info(f"Downloaded file saved to: {download_path}")
+                            
+                            # Process the downloaded file
+                            if download_path.exists():
+                                logger.info(f"Reading downloaded data from {download_path}")
+                                try:
+                                    # Try different encodings if needed
+                                    for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                                        try:
+                                            df = pd.read_csv(download_path, encoding=encoding, low_memory=False)
+                                            if not df.empty:
+                                                logger.info(f"Successfully loaded CSV with {encoding} encoding")
+                                                return (str(download_path), df)
+                                            else:
+                                                logger.warning(f"Downloaded file is empty: {download_path}")
+                                        except UnicodeDecodeError:
+                                            continue
+                                        except Exception as e:
+                                            logger.error(f"Error reading CSV with {encoding} encoding: {e}")
+                                            break
+                                    
+                                    logger.error(f"Failed to read CSV with any encoding")
+                                    return None
+                                except Exception as e_read:
+                                    logger.error(f"Error reading downloaded file: {e_read}")
+                                    return None
+                            else:
+                                logger.error("Download failed or file not saved properly")
+                                return None
+                                
+                        except PlaywrightTimeoutError:
+                            logger.error("Timeout waiting for export button")
+                            save_debug_html(page, f"export_button_timeout_{data_type}_{year}_attempt{attempts}", paths)
+                            raise
+                        
+                    except PlaywrightTimeoutError:
+                        logger.error("Timeout waiting for search results")
+                        save_debug_html(page, f"results_timeout_{data_type}_{year}_attempt{attempts}", paths)
+                        # Take a screenshot of the current state
+                        page.screenshot(path=str(debug_path / f"timeout_results_{attempts}.png"))
+                        raise
+                    
+                # Handle exceptions during the attempt
+                except Exception as e:
+                    logger.error(f"Error during search attempt {attempts}: {e}")
+                    # Save debug info
+                    try:
+                        page.screenshot(path=str(debug_path / f"error_{attempts}.png"))
+                        save_debug_html(page, f"error_{data_type}_{year}_attempt{attempts}", paths)
+                    except:
+                        pass
+                    
+                    # Close context and wait before retry
+                    try:
+                        context.close()
+                    except:
+                        pass
+                    
+                    # If we're on the last attempt, re-raise
+                    if attempts >= max_retries:
+                        logger.error(f"All {max_retries} attempts failed for '{search_term}'")
+                        raise
+                    
+                    # Otherwise wait before retrying
+                    retry_wait = min(30, 5 * attempts)
+                    logger.info(f"Waiting {retry_wait}s before retry attempt {attempts+1}")
+                    time.sleep(retry_wait)
+                    continue
                 
-            except Exception as e:
-                logger.error(f"Error during search form interaction: {e}")
-                save_debug_html(page, f"search_error_{data_type}_{year}", paths)
-                return None
+                # Clean up context if we got here successfully
+                context.close()
+                return None  # Return None if we got here but didn't return data earlier
                 
-        except Exception as e:
-            logger.error(f"Unexpected error in Playwright search: {e}")
-            return None
-        finally:
-            if browser:
-                browser.close()
+            finally:
+                # Ensure we close the browser when completely done
+                if attempts >= max_retries and browser:
+                    logger.debug("Closing browser after all attempts")
+                    browser.close()
     
     return None
 
 # --- Helper Functions ---
 def standardize_columns(df: pd.DataFrame, data_type: str) -> pd.DataFrame:
-    """Standardizes DataFrame columns for a specific finance data type.
+    """
+    Standardize column names in finance data DataFrame.
     
     Args:
-        df: Input DataFrame to standardize
-        data_type: Type of finance data ('contributions' or 'expenditures')
+        df: Raw DataFrame with original column names
+        data_type: Either 'contributions' or 'expenditures'
         
     Returns:
-        DataFrame with standardized column names and all required columns present
-        
-    Raises:
-        ValueError: If data_type is not recognized
+        DataFrame with standardized column names
     """
-    # Get the appropriate column map based on data_type
-    if data_type == 'contributions':
-        column_map = CONTRIBUTION_COLUMN_MAP
-    elif data_type == 'expenditures':
-        column_map = EXPENDITURE_COLUMN_MAP
-    else:
-        raise ValueError(f"Unknown finance data type: {data_type}")
-        
-    # Ensure DataFrame is not empty
-    if df.empty:
-        logger.warning("Attempted to standardize columns on an empty DataFrame.")
-        # Return DataFrame with standard columns but no data
-        return pd.DataFrame(columns=list(column_map.values()))
-
-    original_columns = df.columns.tolist() # Keep original for logging
-    # Clean column names: lowercase, strip whitespace, remove trailing colons
-    df.columns = df.columns.str.lower().str.strip().str.replace(r':$', '', regex=True)
-    rename_dict = {}
-    found_standard_names = set()
-
-    for orig_col, std_col in column_map.items():
-        if orig_col.lower() in df.columns:
-            rename_dict[orig_col.lower()] = std_col
-            found_standard_names.add(std_col)
-            logger.debug(f"Mapping source column '{orig_col}' to standard '{std_col}'")
-
-    # Log unmapped columns after cleaning
-    current_cols_set = set(df.columns)
-    mapped_source_cols_set = set(rename_dict.keys())
-    unmapped_cols = list(current_cols_set - mapped_source_cols_set)
-    if unmapped_cols:
-         logger.warning(f"Unmapped columns found: {unmapped_cols}. Original columns: {original_columns}")
-
-    # Perform renaming
-    df = df.rename(columns=rename_dict)
-
-    # Ensure all standard columns exist, add missing ones with pd.NA
-    standard_columns_list = list(column_map.values())
-    added_cols = []
-    for standard_name in standard_columns_list:
-        if standard_name not in df.columns:
-            df[standard_name] = pd.NA # Use pandas NA type
-            added_cols.append(standard_name)
-    if added_cols:
-         logger.debug(f"Added missing standard columns: {added_cols}")
-
-    # Return DataFrame with only the standard columns in the defined order
-    final_columns = [col for col in standard_columns_list if col in df.columns]
-    return df[final_columns]
+    logger.info(f"Standardizing columns for {data_type} data")
+    
+    # Use the appropriate column map from config
+    if data_type not in FINANCE_COLUMN_MAPS:
+        logger.error(f"Invalid data type: {data_type}. Must be 'contributions' or 'expenditures'")
+        return df
+    
+    column_map = FINANCE_COLUMN_MAPS[data_type]
+    
+    # Convert all column names to lowercase for case-insensitive matching
+    df.columns = [col.lower().strip() for col in df.columns]
+    
+    # Create a mapping of original columns to standardized names
+    orig_to_std = {}
+    
+    # For each standard column, find the first match in the original columns
+    for std_col, possible_names in column_map.items():
+        # Try exact matches first
+        exact_matches = [col for col in df.columns if col in possible_names]
+        if exact_matches:
+            orig_to_std[exact_matches[0]] = std_col
+            continue
+            
+        # Try fuzzy matches for columns that weren't matched exactly
+        for orig_col in df.columns:
+            if any(name in orig_col for name in possible_names):
+                orig_to_std[orig_col] = std_col
+                break
+    
+    # Rename columns based on the mapping
+    df_std = df.rename(columns=orig_to_std)
+    
+    # Log unmapped columns
+    unmapped = set(df.columns) - set(orig_to_std.keys())
+    if unmapped:
+        logger.info(f"Unmapped columns in {data_type} data: {unmapped}")
+    
+    # Log standardized columns
+    logger.info(f"Standardized columns in {data_type} data: {list(df_std.columns)}")
+    
+    return df_std
 
 # --- Website Interaction & Parsing Functions ---
 
@@ -604,8 +708,32 @@ def download_and_extract_finance_data(
 
 
 # --- Main Orchestration Function ---
-def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int] = None, data_dir: Optional[Union[str, Path]] = None) -> Optional[Path]:
-    """Main function to orchestrate scraping Idaho campaign finance data."""
+def run_finance_scrape(
+    start_year: Optional[int] = None, 
+    end_year: Optional[int] = None, 
+    data_dir: Optional[Union[str, Path]] = None,
+    max_search_retries: int = 3,
+    batch_size: int = 10,
+    wait_between_searches: float = 1.5,
+    wait_between_batches: float = 10.0,
+    debug_mode: bool = False
+) -> Optional[Path]:
+    """
+    Main function to orchestrate scraping Idaho campaign finance data with improved reliability.
+    
+    Args:
+        start_year: Start year for data collection (defaults to current year)
+        end_year: End year for data collection (defaults to current year)
+        data_dir: Optional override for base data directory
+        max_search_retries: Maximum number of retries for each search
+        batch_size: Number of searches to perform before a longer pause
+        wait_between_searches: Seconds to wait between individual searches
+        wait_between_batches: Seconds to wait between batches of searches
+        debug_mode: Whether to run browser in headful mode for debugging
+        
+    Returns:
+        Optional[Path]: Path to the final consolidated output file, or None on failure
+    """
     # Setup paths using the provided base directory or default from config
     paths = setup_project_paths(data_dir)
 
@@ -626,6 +754,8 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
     logger.info(f"Data Source: Idaho Sunshine Portal ({ID_FINANCE_BASE_URL})")
     logger.info(f"Target Years: {start_year}-{end_year}")
     logger.info(f"Base Data Directory: {paths['base']}")
+    logger.info(f"Search Configuration: max_retries={max_search_retries}, batch_size={batch_size}")
+    logger.info(f"Debug Mode: {debug_mode}")
 
     # --- Load Legislator Names for Searching ---
     legislators_file = paths['processed'] / 'legislators_ID.csv'
@@ -655,63 +785,96 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
     if 'raw_campaign_finance' not in paths:
         paths['raw_campaign_finance'] = paths['raw'] / 'campaign_finance'
         paths['raw_campaign_finance'].mkdir(parents=True, exist_ok=True)
+    
+    # Create artifacts directory for debug files
+    artifacts_dir = paths['base'] / 'artifacts'
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    paths['artifacts'] = artifacts_dir
+    debug_dir = artifacts_dir / 'debug'
+    debug_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Iterate and Scrape ---
     all_finance_data_dfs: List[pd.DataFrame] = []
     search_attempts = 0
     download_successes = 0
     download_failures = 0
+    search_skips = 0
 
     years_to_process = list(range(start_year, end_year + 1))
     # Use nested tqdm for better progress visibility
     for year in tqdm(years_to_process, desc="Processing Years", unit="year", position=0):
         logger.info(f"--- Processing Year: {year} ---")
-        # Add inner tqdm for targets within a year
-        for target_name in tqdm(search_targets, desc=f"Searching Targets ({year})", unit="target", position=1, leave=False):
-            # Search for both contributions and expenditures for each target in this year
-            for data_type in ['contributions', 'expenditures']:
-                search_attempts += 1
-                logger.debug(f"Attempting search: Type={data_type}, Target='{target_name}', Year={year}")
+        
+        # Process targets in batches
+        current_batch = 0
+        for batch_start in range(0, len(search_targets), batch_size):
+            current_batch += 1
+            batch_targets = search_targets[batch_start:batch_start + batch_size]
+            logger.info(f"Processing batch {current_batch} for year {year} ({len(batch_targets)} targets)")
+            
+            # Add inner tqdm for targets within a batch
+            for target_name in tqdm(batch_targets, desc=f"Batch {current_batch} ({year})", unit="target", position=1, leave=False):
+                # Search for both contributions and expenditures for each target in this year
+                for data_type in ['contributions', 'expenditures']:
+                    search_attempts += 1
+                    logger.debug(f"Attempting search: Type={data_type}, Target='{target_name}', Year={year}")
 
-                # Polite wait before initiating search
-                time.sleep(random.uniform(0.6, ID_FINANCE_DOWNLOAD_WAIT_SECONDS + 0.5))
+                    # Check if we've already collected this data (to avoid duplicates)
+                    existing_file_pattern = f"{data_type}_{target_name.replace(' ', '_')}_{year}_*.csv"
+                    existing_files = list((paths['raw_campaign_finance'] / 'idaho' / str(year)).glob(existing_file_pattern))
+                    if existing_files:
+                        logger.info(f"Found existing data file for {data_type}, '{target_name}', {year}. Skipping.")
+                        search_skips += 1
+                        continue
 
-                try:
-                    # Call the Playwright search function
-                    search_result = search_with_playwright(target_name, year, data_type, paths)
-
-                    if search_result:
-                        download_path, data_df = search_result
-                        logger.info(f"Successfully downloaded data for {data_type}, '{target_name}', {year}")
-                        
-                        # Process the downloaded data
-                        df_processed = download_and_extract_finance_data(
-                            download_path, data_df, target_name, year, data_type, paths
+                    try:
+                        # Call the optimized Playwright search function
+                        search_result = search_with_playwright(
+                            target_name, 
+                            year, 
+                            data_type, 
+                            paths,
+                            max_retries=max_search_retries, 
+                            custom_timeout_ms=90000,  # 90 seconds timeout
+                            debug_mode=debug_mode
                         )
 
-                        if df_processed is not None and not df_processed.empty:
-                            all_finance_data_dfs.append(df_processed)
-                            download_successes += 1
+                        if search_result:
+                            download_path, data_df = search_result
+                            logger.info(f"Successfully downloaded data for {data_type}, '{target_name}', {year}")
+                            
+                            # Process the downloaded data
+                            df_processed = download_and_extract_finance_data(
+                                download_path, data_df, target_name, year, data_type, paths
+                            )
+
+                            if df_processed is not None and not df_processed.empty:
+                                all_finance_data_dfs.append(df_processed)
+                                download_successes += 1
+                            else:
+                                logger.warning(f"Processing failed for {data_type}, '{target_name}', {year}")
+                                download_failures += 1
                         else:
-                            logger.warning(f"Processing failed for {data_type}, '{target_name}', {year}")
-                            download_failures += 1
-                    else:
-                         logger.debug(f"No data found for {data_type}, '{target_name}', {year}")
-                         # Not a download failure, just no data reported
+                             logger.debug(f"No data found for {data_type}, '{target_name}', {year}")
+                             # Not a download failure, just no data reported
 
-                except Exception as e_scrape_loop:
-                     logger.error(f"Unhandled error during scrape loop for {data_type}, '{target_name}', {year}: {e_scrape_loop}", exc_info=True)
-                     download_failures += 1
+                    except Exception as e_scrape_loop:
+                         logger.error(f"Unhandled error during scrape loop for {data_type}, '{target_name}', {year}: {e_scrape_loop}", exc_info=True)
+                         download_failures += 1
                 
-                # Small delay between searches
-                time.sleep(random.uniform(0.2, 0.6))
+                    # Small delay between searches to be polite to the server
+                    time.sleep(random.uniform(0.5, wait_between_searches))
 
-            # Wait a bit longer between different legislators/committees
-            time.sleep(random.uniform(0.5, 1.5))
+            # Wait between batches to avoid overwhelming the server
+            if current_batch < (len(search_targets) + batch_size - 1) // batch_size:
+                batch_wait = random.uniform(wait_between_batches * 0.8, wait_between_batches * 1.2)
+                logger.info(f"Completed batch {current_batch}. Waiting {batch_wait:.1f}s before next batch...")
+                time.sleep(batch_wait)
 
     # --- Consolidate and Save Results ---
     logger.info(f"--- Idaho Finance Scraping Finished ({start_year}-{end_year}) ---")
     logger.info(f"Total search attempts (Target*Year*Type): {search_attempts}")
+    logger.info(f"Skipped searches (already collected): {search_skips}")
     logger.info(f"Successful data extractions (non-empty): {download_successes}")
     logger.info(f"Failed downloads or processing errors: {download_failures}")
 
@@ -721,7 +884,7 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
 
     final_output_path: Optional[Path] = None
     try:
-        # Concatenate all collected DataFrames
+        # Consolidate all collected DataFrames
         logger.info(f"Consolidating {len(all_finance_data_dfs)} collected finance dataframes...")
         consolidated_df = pd.concat(all_finance_data_dfs, ignore_index=True, sort=False)
         total_records = len(consolidated_df)
@@ -745,11 +908,17 @@ def run_finance_scrape(start_year: Optional[int] = None, end_year: Optional[int]
             {'source_search_term', 'data_source_url', 'scrape_year', 'raw_file_path', 'scrape_timestamp', 'data_type'}
         ))
 
+        # Save main CSV file
         num_saved = convert_to_csv(records_list, output_file, columns=final_columns)
 
         if num_saved == total_records:
             logger.info(f"Successfully saved {num_saved} consolidated finance records to: {output_file}")
             final_output_path = output_file
+            
+            # Also save a backup copy in case of corruption
+            backup_file = paths['processed'] / f'finance_ID_consolidated_{start_year}-{end_year}_backup.csv'
+            shutil.copy2(output_file, backup_file)
+            logger.info(f"Created backup copy at: {backup_file}")
         else:
             logger.error(f"Mismatch saving consolidated data. Expected {total_records}, saved {num_saved}. Check logs and output file: {output_file}")
             final_output_path = output_file if output_file.exists() else None
@@ -773,8 +942,18 @@ if __name__ == "__main__":
                         help='End year for data collection (default: current year)')
     parser.add_argument('--data-dir', type=str, default=None,
                         help='Override base data directory (default: ./data from config/utils)')
+    parser.add_argument('--max-retries', type=int, default=3,
+                        help='Maximum number of retry attempts for each search')
+    parser.add_argument('--batch-size', type=int, default=10,
+                        help='Number of legislators to process before a longer pause')
+    parser.add_argument('--search-wait', type=float, default=1.5,
+                        help='Seconds to wait between individual searches')
+    parser.add_argument('--batch-wait', type=float, default=10.0,
+                        help='Seconds to wait between batches')
     parser.add_argument('--debug', action='store_true',
                         help='Run browser in headful mode for debugging')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume collection, skipping already downloaded files')
 
     args = parser.parse_args()
 
@@ -790,10 +969,21 @@ if __name__ == "__main__":
     # --- Run the main scraping logic ---
     final_output = None
     try:
+        logger.info("Starting Idaho finance scraping with the following parameters:")
+        logger.info(f"Years: {args.start_year or 'current'}-{args.end_year or 'current'}")
+        logger.info(f"Retries: {args.max_retries}, Batch size: {args.batch_size}")
+        logger.info(f"Wait times: {args.search_wait}s between searches, {args.batch_wait}s between batches")
+        logger.info(f"Debug mode: {args.debug}, Resume mode: {args.resume}")
+        
         final_output = run_finance_scrape(
             start_year=args.start_year,
             end_year=args.end_year,
-            data_dir=paths['base']
+            data_dir=paths['base'],
+            max_search_retries=args.max_retries,
+            batch_size=args.batch_size,
+            wait_between_searches=args.search_wait,
+            wait_between_batches=args.batch_wait,
+            debug_mode=args.debug
         )
 
         if final_output and final_output.exists():

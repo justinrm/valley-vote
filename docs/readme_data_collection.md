@@ -8,7 +8,7 @@ This script serves as the primary data acquisition tool for the Valley Vote proj
 *   Legislative Sessions (`getSessionList`)
 *   Legislator Profiles (`getSessionPeople`)
 *   Committee Definitions (`getCommittee`)
-*   Bills (Master List via `getMasterListRaw`, Details via `getBill`)
+*   Bills (Bulk Dataset via `getDatasetList`, `getDataset`)
 *   Bill Sponsors (extracted from `getBill`)
 *   Roll Call Votes (Stubs from `getBill`, Details via `getRollCall`)
 *   Full Bill Texts, Amendments, and Supplements (Optional via `--fetch-*` flags, using `getText`, `getAmendment`, `getSupplement`)
@@ -27,11 +27,9 @@ getSessionPeople: Gets legislator details for a specific session (used for prima
 
 getCommittee: Fetches committee definitions for a session.
 
-getMasterList: Gets the list of bills for a session.
+getDatasetList: Gets information about available bulk datasets for a session.
 
-getBill: Retrieves detailed information for a specific bill, including sponsors, vote stubs, text/amendment/supplement stubs, subjects, and history.
-
-*   Efficient Bill Fetching: Uses `getMasterListRaw` and compares `change_hash` values to fetch details (`getBill`) only for new or updated bills, reducing API calls.
+getDataset: Downloads a ZIP archive containing bill JSON data for an entire session.
 
 getRollCall: Fetches detailed vote results (including individual legislator votes) for a specific vote ID.
 
@@ -136,11 +134,17 @@ Command-Line Arguments:
 
 --fetch-supplements: Fetch full supplement documents via API (requires extra API calls).
 
+--force-dataset-download: Force download of datasets even if hash matches (requires --run bills).
+
 Directory Structure
 
 The script creates and uses the following directory structure within the specified base data directory (default is ./data/):
 
 <base_data_dir>/
+├── artifacts/
+│   ├── legiscan_dataset_hashes.json  # Stores dataset hashes to avoid redundant downloads
+│   ├── legiscan_datasets/            # Extracted dataset files from getDataset API
+│   └── monitor/                      # Scraped HTML for monitoring website structure
 ├── raw/
 │   ├── legislators/      # Raw JSON per legislator (e.g., 12345.json), all_legislators_{state}.json
 │   ├── committees/       # yearly subdirs (e.g., 2023/) containing raw JSON per committee (e.g., committee_678.json), session summary (e.g., committees_{session_id}.json), yearly summary (e.g., all_committees_{year}_{state}.json)
@@ -181,13 +185,15 @@ Collects unique legislators across all identified sessions (getSessionPeople) an
 
 Iterates through each relevant session:
 
-Collects session details (e.g., using `getDataset` for session info if needed, though typically derived from `getSessionList`).
+Collects session details derived from `getSessionList` and bulk dataset info via `getDatasetList`.
 
 Collects committee definitions (getCommittee).
 
-Collects master bill list (getMasterList).
+For bill data: Checks if a dataset download is needed by comparing stored dataset hashes to current API hash.
 
-For each bill in the master list: Compares `change_hash` to previously stored value (if any). If different or new, fetches detailed bill data (`getBill`), extracts bill info, sponsor records, vote stubs, text/amendment/supplement stubs.
+If download is needed: Downloads and extracts the bulk dataset ZIP archive using `getDataset`.
+
+Processes all bill JSON files from the extracted dataset, extracting bill info, sponsor records, vote stubs, text/amendment/supplement stubs.
 
 For each vote stub identified: Fetches detailed roll call data (getRollCall) and extracts individual legislator vote records.
 

@@ -9,6 +9,9 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Iterable, Union
 import re
+import io
+import zipfile
+import shutil # Added for directory removal
 
 # Third-party imports
 import requests
@@ -254,6 +257,243 @@ def _fetch_and_save_document(
     except Exception as e:
         logger.error(f"Unhandled exception fetching {doc_type} document {doc_id} (bill {bill_id}): {e}", exc_info=True)
         return False # Indicate fetch failure
+
+
+# --- LegiScan Bulk Dataset Helpers ---
+
+# Path to store dataset hashes to avoid re-downloading
+DATASET_HASH_STORE_FILENAME = "legiscan_dataset_hashes.json"
+
+def _load_dataset_hashes(paths: Dict[str, Path]) -> Dict[str, str]:
+    """Loads the stored dataset hashes from the artifacts directory."""
+    hash_file_path = paths.get('artifacts') / DATASET_HASH_STORE_FILENAME
+    if hash_file_path.exists():
+        hashes = load_json(hash_file_path)
+        if isinstance(hashes, dict):
+            # Ensure keys are integers (session IDs)
+            try:
+                return {int(k): v for k, v in hashes.items()}
+            except ValueError:
+                 logger.warning(f"Invalid keys found in {hash_file_path}. Returning empty hashes.")
+                 return {}
+        else:
+            logger.warning(f"Dataset hash file {hash_file_path} is not a valid dictionary. Returning empty hashes.")
+            return {}
+    return {}
+
+def _save_dataset_hashes(hashes: Dict[int, str], paths: Dict[str, Path]):
+    """Saves the dataset hashes to the artifacts directory."""
+    hash_file_path = paths.get('artifacts') / DATASET_HASH_STORE_FILENAME
+    # Ensure parent directory exists
+    hash_file_path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(hashes, hash_file_path)
+
+
+@retry( # Use similar retry logic as fetch_api_data
+    stop=stop_after_attempt(LEGISCAN_MAX_RETRIES),
+    wait=wait_exponential(multiplier=1.5, min=2, max=60),
+    retry=retry_if_exception_type((requests.exceptions.RequestException, APIRateLimitError)),
+    before_sleep=before_sleep_log(logging.getLogger(), logging.WARNING)
+)
+def get_session_dataset_info(session_id: int) -> Optional[Dict[str, str]]:
+    """
+    Calls getDatasetList for a specific session_id to get its dataset hash and access key.
+    Note: This function itself uses an API call.
+    """
+    logger.info(f"Fetching dataset info for session_id: {session_id}")
+    params = {'id': session_id}
+    try:
+        # Use fetch_api_data for consistency in error handling/retries
+        data = fetch_api_data('getDatasetList', params)
+
+        if not data or data.get('status') != 'OK' or 'datasetlist' not in data:
+            logger.error(f"Failed to retrieve valid dataset list for session {session_id}. Status: {data.get('status', 'N/A')}")
+            return None
+
+        dataset_list = data.get('datasetlist', [])
+        if isinstance(dataset_list, list) and len(dataset_list) > 0:
+            # Assume the first entry is the relevant one when querying by session_id
+            dataset_info = dataset_list[0]
+            if isinstance(dataset_info, dict) and dataset_info.get('session_id') == session_id:
+                info = {
+                    'session_id': dataset_info.get('session_id'),
+                    'dataset_hash': dataset_info.get('dataset_hash'),
+                    'dataset_date': dataset_info.get('dataset_date'),
+                    'dataset_size': dataset_info.get('dataset_size'),
+                    'access_key': dataset_info.get('access_key'),
+                }
+                if info['dataset_hash'] and info['access_key']:
+                    logger.info(f"Found dataset info for session {session_id}: hash={info['dataset_hash']}, date={info['dataset_date']}")
+                    return info
+                else:
+                     logger.warning(f"Dataset info for session {session_id} missing hash or access key: {dataset_info}")
+                     return None
+            else:
+                logger.warning(f"Unexpected data structure in dataset list for session {session_id}: {dataset_info}")
+                return None
+        elif isinstance(dataset_list, list) and len(dataset_list) == 0:
+            logger.info(f"No dataset found listed for session {session_id} via getDatasetList.")
+            return None
+        else:
+            logger.error(f"Unexpected format for datasetlist response for session {session_id}: {type(dataset_list)}")
+            return None
+
+    except APIResourceNotFoundError:
+        # This might mean the session exists but has no dataset, which is possible.
+        logger.info(f"LegiScan API reported no dataset found for session {session_id} (Resource Not Found).")
+        return None
+    except APIRateLimitError:
+        logger.error(f"Hit LegiScan rate limit fetching dataset list for session {session_id}.")
+        raise # Re-raise critical errors
+    except Exception as e:
+        logger.error(f"Unhandled exception fetching dataset list for session {session_id}: {e}", exc_info=True)
+        return None
+
+
+@retry( # Use retry logic, perhaps longer timeout for potential large downloads
+    stop=stop_after_attempt(LEGISCAN_MAX_RETRIES),
+    wait=wait_exponential(multiplier=2, min=5, max=120), # Longer wait for downloads
+    retry=retry_if_exception_type((requests.exceptions.RequestException, APIRateLimitError)),
+    before_sleep=before_sleep_log(logging.getLogger(), logging.WARNING)
+)
+def download_and_extract_dataset(
+    session_id: int,
+    access_key: str,
+    extract_base_path: Path,
+    expected_hash: Optional[str] = None # Optional: To verify against API hash after download (though API verifies key)
+) -> Optional[Path]:
+    """
+    Downloads the dataset ZIP for a session using getDataset, verifies it,
+    and extracts its contents, returning the path to the 'bill' subdirectory.
+    """
+    if not LEGISCAN_API_KEY:
+        logger.error("Cannot download dataset: LEGISCAN_API_KEY is not set.")
+        return None
+
+    # Prepare request parameters
+    params = {
+        'key': LEGISCAN_API_KEY,
+        'op': 'getDataset',
+        'id': session_id,
+        'access_key': access_key
+    }
+    # Use 'id' if present, otherwise 'N/A' for logging clarity
+    request_id_log = params.get('id', 'N/A')
+
+    # Calculate sleep duration with jitter (add a bit more wait before dataset download)
+    base_wait = LEGISCAN_DEFAULT_WAIT_SECONDS + 1.0 # Add extra second
+    sleep_duration = max(0.1, base_wait + random.uniform(-0.2, 0.4)) # Ensure non-negative
+    logger.debug(f"Sleeping for {sleep_duration:.2f}s before LegiScan API request (op: getDataset, id: {request_id_log})")
+    time.sleep(sleep_duration)
+
+    # Define extraction path for this specific session dataset
+    # Example: artifacts/datasets/session_1234/
+    session_extract_path = extract_base_path / f"session_{session_id}"
+    bill_extract_path = session_extract_path / "bill" # Target path for bill JSONs
+
+    try:
+        logger.info(f"Downloading LegiScan dataset: session_id={session_id}, access_key={access_key[:5]}...")
+        log_params = {k: v for k, v in params.items() if k != 'key'}
+        logger.debug(f"Request params (key omitted): {log_params}")
+
+        # Stream the download to handle potentially large files
+        response = requests.get(LEGISCAN_BASE_URL, params=params, timeout=300, stream=True) # Increased timeout, stream=True
+
+        # 1. Check for Rate Limit specifically (HTTP 429)
+        if response.status_code == 429:
+            logger.warning(f"LegiScan Rate limit hit (HTTP 429) for op=getDataset, id={session_id}. Backing off...")
+            raise APIRateLimitError("Rate limit exceeded")
+
+        # 2. Check for other HTTP errors using raise_for_status()
+        response.raise_for_status() # Raises HTTPError for 4xx/5xx
+
+        # 3. Check Content-Type, should be application/zip
+        content_type = response.headers.get('Content-Type')
+        if 'application/zip' not in content_type:
+            # Check if it's JSON indicating an API error message
+            if 'application/json' in content_type:
+                try:
+                    error_data = response.json()
+                    status = error_data.get('status')
+                    error_msg = error_data.get('alert', {}).get('message', 'Unknown LegiScan API error')
+                    if status == 'ERROR':
+                         logger.error(f"LegiScan API error response for getDataset (session {session_id}): {error_msg}")
+                         # Distinguish "not found" / "invalid key" errors
+                         if "not found" in error_msg.lower() or "invalid key" in error_msg.lower() or "invalid id" in error_msg.lower():
+                             logger.warning(f"LegiScan dataset likely unavailable or key invalid for session {session_id}.")
+                             raise APIResourceNotFoundError(f"Dataset not found or access key invalid for session {session_id}: {error_msg}")
+                         return None # Other API errors mean failure
+                    else: # Unexpected JSON response
+                         logger.error(f"Unexpected JSON response from getDataset for session {session_id}: {error_data}")
+                         return None
+                except json.JSONDecodeError:
+                    logger.error(f"Unexpected Content-Type '{content_type}' from getDataset for session {session_id}, and not valid JSON. Preview: {response.text[:200]}...")
+                    return None
+            else:
+                # Unexpected content type
+                logger.error(f"Unexpected Content-Type '{content_type}' received for getDataset session {session_id}. Expected 'application/zip'.")
+                return None
+
+        # 4. Process ZIP file content (using stream)
+        logger.info(f"Successfully connected for dataset download (session {session_id}). Processing ZIP stream...")
+        try:
+            # Ensure extraction directory exists and is empty (overwrite previous attempt)
+            if session_extract_path.exists():
+                import shutil
+                logger.warning(f"Removing existing extraction directory: {session_extract_path}")
+                shutil.rmtree(session_extract_path)
+            session_extract_path.mkdir(parents=True, exist_ok=True)
+
+            # Read the response content into memory (for zipfile)
+            # Be mindful of memory usage for very large datasets
+            zip_content = io.BytesIO()
+            for chunk in response.iter_content(chunk_size=8192):
+                zip_content.write(chunk)
+            zip_content.seek(0) # Reset stream position
+
+            with zipfile.ZipFile(zip_content, 'r') as zip_ref:
+                logger.info(f"Extracting ZIP archive to: {session_extract_path}")
+                zip_ref.extractall(session_extract_path)
+                logger.info(f"Successfully extracted dataset for session {session_id}.")
+
+                # Verify expected structure (at least 'bill' subdirectory should exist)
+                if not bill_extract_path.is_dir():
+                    logger.error(f"Extracted dataset for session {session_id} is missing the expected 'bill' subdirectory at {bill_extract_path}")
+                    # Clean up potentially corrupted extraction
+                    # shutil.rmtree(session_extract_path)
+                    return None
+
+                return bill_extract_path # Return path to the bill files
+
+        except zipfile.BadZipFile:
+            logger.error(f"Downloaded file for session {session_id} is not a valid ZIP archive.")
+            # Clean up potentially corrupted extraction
+            if session_extract_path.exists(): import shutil; shutil.rmtree(session_extract_path)
+            return None
+        except Exception as e_zip:
+             logger.error(f"Error extracting ZIP file for session {session_id}: {e_zip}", exc_info=True)
+             if session_extract_path.exists(): import shutil; shutil.rmtree(session_extract_path)
+             return None
+
+    # Handle specific exceptions during the request/response process (similar to fetch_api_data)
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else 'N/A'
+        if status_code == 404:
+            logger.warning(f"LegiScan HTTP 404 Not Found for getDataset session {session_id}. Assuming resource does not exist.")
+            raise APIResourceNotFoundError(f"HTTP 404 Not Found for getDataset session {session_id}") from e
+        elif 400 <= status_code < 500:
+             logger.error(f"LegiScan Client error {status_code} downloading dataset for session {session_id}: {e}. Check parameters/key.")
+             return None # Signal failure
+        elif status_code >= 500:
+            logger.error(f"LegiScan Server error {status_code} downloading dataset for session {session_id}: {e}. Might retry.")
+            raise requests.exceptions.RequestException(f"Server error {status_code}") from e # Allow retry
+        else:
+             logger.error(f"Unhandled LegiScan HTTP error {status_code} downloading dataset for session {session_id}: {e}", exc_info=True)
+             raise requests.exceptions.RequestException(f"Unhandled HTTP error {status_code}") from e # Allow retry
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Final LegiScan Request exception after retries for getDataset session {session_id}: {str(e)}.")
+        raise # Re-raise final exception
 
 
 # --- LegiScan Data Collection Functions ---
@@ -508,9 +748,13 @@ def collect_committee_definitions(session: Dict[str, Any], paths: Dict[str, Path
     processed_committees = [] # List to hold cleaned committee data for this session
 
     try:
-        data = fetch_api_data('getCommittee', params) # API Operation: getCommittee
-        # Handle fetch failure or invalid response
-        if not data or data.get('status') != 'OK' or 'committees' not in data:
+        data = fetch_api_data('getSessionCommittees', params) # API Operation: getSessionCommittees
+        # Handle fetch failure (None data) or invalid response structure
+        if data is None:
+            logger.error(f"API call failed for getSessionCommittees for session {session_id}. Skipping.")
+            save_json([], session_committees_json_path)
+            return
+        if data.get('status') != 'OK' or 'committees' not in data:
             logger.warning(f"Failed to retrieve valid committee definitions for session {session_id}. Status: {data.get('status', 'N/A')}")
             save_json([], session_committees_json_path) # Save empty list to indicate processed
             return
@@ -575,13 +819,18 @@ def collect_committee_definitions(session: Dict[str, Any], paths: Dict[str, Path
     save_json(processed_committees, session_committees_json_path)
 
 
-def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path], fetch_flags: Optional[Dict[str, bool]] = None):
+def collect_bills_votes_sponsors(
+    session: Dict[str, Any],
+    paths: Dict[str, Path],
+    dataset_hashes: Dict[int, str], # Pass in the loaded hashes
+    fetch_flags: Optional[Dict[str, bool]] = None,
+    force_download: bool = False # Add flag to force download
+):
     """
-    Fetch and save bills, associated votes, sponsors, and optionally full texts,
+    Fetch and save bills using the LegiScan Bulk Dataset API (getDatasetList/getDataset).
+    Then, fetch associated votes (getRollCall) and optionally full texts,
     amendments, and supplements for a single LegiScan session.
-    Uses getMasterListRaw, compares change_hash, and calls getBill only for
-    new/changed bills. Fetches votes (getRollCall) and documents (getText, etc.)
-    for all relevant bills (new, changed, and unchanged).
+    Updates dataset hashes state.
     """
     fetch_flags = fetch_flags or {} # Default to empty dict if None
     fetch_texts_flag = fetch_flags.get('fetch_texts', False)
@@ -591,20 +840,24 @@ def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path]
     session_id = session.get('session_id')
     session_name = session.get('session_name', f'ID: {session_id}')
     year = session.get('year_start')
-    # Get relevant directories from paths dict
+
+    # Get relevant output directories from paths dict
     bills_dir = paths['raw_bills']
     votes_dir = paths['raw_votes']
     sponsors_dir = paths['raw_sponsors']
-    # Define paths for new document types (use .get() for safety)
+    # Paths for optional document types
     texts_dir = paths.get('raw_texts')
     amendments_dir = paths.get('raw_amendments')
     supplements_dir = paths.get('raw_supplements')
+    # Path for storing/extracting datasets
+    dataset_storage_base = paths.get('artifacts') / 'legiscan_datasets'
+    dataset_storage_base.mkdir(parents=True, exist_ok=True)
 
     if not session_id or not year:
         logger.warning(f"Session missing ID or valid start year: {session_name}. Skipping bill/vote/sponsor collection.")
         return
 
-    # Ensure year-specific subdirectories exist
+    # Ensure year-specific output subdirectories exist
     bills_year_dir = bills_dir / str(year); bills_year_dir.mkdir(parents=True, exist_ok=True)
     votes_year_dir = votes_dir / str(year); votes_year_dir.mkdir(parents=True, exist_ok=True)
     sponsors_year_dir = sponsors_dir / str(year); sponsors_year_dir.mkdir(parents=True, exist_ok=True)
@@ -625,7 +878,7 @@ def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path]
         supplements_year_dir = supplements_dir / str(year); supplements_year_dir.mkdir(parents=True, exist_ok=True)
     elif fetch_supplements_flag: logger.warning("Cannot fetch supplements: 'raw_supplements' path not configured in project paths.")
 
-    logger.info(f"Collecting bills, votes, sponsors for {year} session: {session_name} (ID: {session_id})...")
+    logger.info(f"Collecting bills via Bulk Dataset for {year} session: {session_name} (ID: {session_id})...")
     # Log only if any flag is true
     if any([fetch_texts_flag, fetch_amendments_flag, fetch_supplements_flag]):
         logger.info(f"Document Fetching: Texts={fetch_texts_flag}, Amendments={fetch_amendments_flag}, Supplements={fetch_supplements_flag}")
@@ -635,114 +888,89 @@ def collect_bills_votes_sponsors(session: Dict[str, Any], paths: Dict[str, Path]
     session_sponsors_json_path = sponsors_year_dir / f'sponsors_{session_id}.json'
     session_votes_json_path = votes_year_dir / f'votes_{session_id}.json'
 
-    # --- 1. Load Previous Bill Data (if exists) ---
-    previous_bills_data: Dict[int, Dict[str, Any]] = {}
-    if session_bills_json_path.exists():
-        logger.info(f"Loading previous bill data from: {session_bills_json_path}")
-        loaded_data = load_json(session_bills_json_path)
-        if isinstance(loaded_data, list):
-            for bill_record in loaded_data:
-                if isinstance(bill_record, dict) and 'bill_id' in bill_record:
-                    previous_bills_data[bill_record['bill_id']] = bill_record
-            logger.info(f"Loaded {len(previous_bills_data)} bill records from previous run.")
-        else:
-            logger.warning(f"Previous bill data file {session_bills_json_path} is not a list. Will fetch all bills.")
+    # Initialize variables that need to be defined for all code paths
+    dataset_bill_dir = None
+    needs_download = False
+    current_hash = "unknown"
+    access_key = ""
+    dataset_size = 0
+    extracted_bill_path_check = dataset_storage_base / f"session_{session_id}" / "bill"
 
-    # --- 2. Get Master List Raw with Change Hashes ---
-    logger.info("Fetching master list raw...")
-    params = {'id': session_id}
-    master_list_raw = {}
-    bill_stubs_from_api = [] # List of {'bill_id': id, 'change_hash': hash}
-
+    # --- 1. Check Dataset Status (getDatasetList) ---
     try:
-        master_list_data = fetch_api_data('getMasterListRaw', params) # Use getMasterListRaw
-        if not master_list_data or master_list_data.get('status') != 'OK' or 'masterlist' not in master_list_data:
-            logger.error(f"Failed to retrieve valid master bill list raw for session {session_id}. Status: {master_list_data.get('status', 'N/A')}")
-            # Save empty lists to mark session as attempted (if appropriate, depends on desired behavior on failure)
-            # save_json([], session_bills_json_path)
-            # save_json([], session_sponsors_json_path)
-            # save_json([], session_votes_json_path)
-            return # Critical failure, cannot proceed without master list
+        logger.info(f"Checking dataset status for session {session_id}...")
+        dataset_info = get_session_dataset_info(session_id)
 
-        # Save the raw masterlist response (still useful for debugging)
-        save_json(master_list_data, bills_year_dir / f"masterlist_raw_{session_id}.json")
-
-        master_list_raw = master_list_data.get('masterlist', {})
-        if not isinstance(master_list_raw, dict) or not master_list_raw:
-            logger.warning(f"Masterlist raw for session {session_id} is empty or not a dictionary ({type(master_list_raw)}). No bills to process.")
-            save_json([], session_bills_json_path) # Save empty lists if no bills
-            save_json([], session_sponsors_json_path)
-            save_json([], session_votes_json_path)
-            return
-
-        # Extract bill_id and change_hash from each entry
-        for key, bill_stub in master_list_raw.items():
-             if isinstance(bill_stub, dict) and 'bill_id' in bill_stub and 'change_hash' in bill_stub:
-                  bill_stubs_from_api.append({
-                      'bill_id': bill_stub['bill_id'],
-                      'change_hash': bill_stub['change_hash']
-                  })
-             # else: logger.debug(f"Skipping non-standard entry in masterlist raw: key='{key}'")
-
-        if not bill_stubs_from_api:
-            logger.warning(f"Masterlist raw for session {session_id} contained no valid bill entries. No bills processed.")
+        if not dataset_info:
+            logger.warning(f"No dataset information found for session {session_id}. Cannot proceed with bulk download for bills.")
+            # Could potentially fall back to old getMasterListRaw/getBill method here if desired
+            # For now, we'll just skip bill processing if dataset isn't available
             save_json([], session_bills_json_path)
             save_json([], session_sponsors_json_path)
             save_json([], session_votes_json_path)
             return
 
-        logger.info(f"Found {len(bill_stubs_from_api)} bills in masterlist raw for session {session_id}.")
+        current_hash = dataset_info['dataset_hash']
+        access_key = dataset_info['access_key']
+        dataset_size = dataset_info['dataset_size']
+        stored_hash = dataset_hashes.get(session_id)
 
-    # Handle API errors during master list fetch
-    except APIResourceNotFoundError:
-         logger.warning(f"Master bill list raw not found via API for session {session_name} (ID: {session_id}). Cannot process session.")
-         # Save empty lists? Or just return? Returning seems safer.
-         return
-    except APIRateLimitError:
-        logger.error(f"Hit LegiScan rate limit fetching master list raw for session {session_id}.")
-        raise # Halt processing for this session
+        # Determine if download is needed
+        if force_download:
+            logger.info(f"Forcing dataset download for session {session_id} due to --force-dataset-download flag.")
+            needs_download = True
+        elif stored_hash != current_hash:
+            logger.info(f"Dataset hash mismatch for session {session_id} (Stored: {stored_hash}, API: {current_hash}). Download needed.")
+            needs_download = True
+        elif stored_hash is None:
+            logger.info(f"Stored hash not found for session {session_id}. Download needed.")
+            needs_download = True
+
+        # Check if extracted data directory exists, even if hash matches (unless forced)
+        extracted_bill_path_check = dataset_storage_base / f"session_{session_id}" / "bill"
+        if not needs_download and not extracted_bill_path_check.is_dir():
+            logger.warning(f"Dataset hash matches ({current_hash}), but extracted data directory missing: {extracted_bill_path_check}. Download needed.")
+            needs_download = True
+
+    except (APIResourceNotFoundError, APIRateLimitError) as e:
+         logger.error(f"API error preventing dataset check/download for session {session_id}: {e}")
+         # Don't save empty lists here, might be transient API issue
+         return # Stop processing this session
     except Exception as e:
-        logger.error(f"Unhandled exception fetching master list raw for session {session_name} (ID: {session_id}): {e}", exc_info=True)
+        logger.error(f"Unhandled exception during dataset check/download for session {session_id}: {e}", exc_info=True)
+        # Don't save empty lists here
         return # Stop processing this session
 
-    # --- 3. Determine Bills to Fetch vs Reuse ---
-    bill_ids_to_fetch_details = []
-    reused_bills = []
-    current_api_bill_ids = set()
+    # --- 2. Determine if Download/Extraction is Needed (Decision Point) ---
+    if needs_download:
+        # --- 3. Download and Extract Dataset ---
+        dataset_bill_dir = download_and_extract_dataset(
+            session_id, access_key, dataset_size, dataset_storage_base, expected_hash=current_hash
+        )
 
-    for stub in bill_stubs_from_api:
-        bill_id = stub['bill_id']
-        api_change_hash = stub['change_hash']
-        current_api_bill_ids.add(bill_id)
-
-        previous_bill_record = previous_bills_data.get(bill_id)
-
-        if previous_bill_record:
-            stored_change_hash = previous_bill_record.get('change_hash')
-            if stored_change_hash == api_change_hash:
-                # Hashes match, reuse the stored data
-                reused_bills.append(previous_bill_record)
-                logger.debug(f"Bill {bill_id}: Change hash matches ({api_change_hash}). Reusing previous data.")
-            else:
-                # Hashes differ, need to fetch updated details
-                bill_ids_to_fetch_details.append(bill_id)
-                logger.debug(f"Bill {bill_id}: Change hash mismatch (API: {api_change_hash}, Stored: {stored_change_hash}). Fetching details.")
+        if dataset_bill_dir:
+            # Successfully downloaded and extracted, update the hash store
+            dataset_hashes[session_id] = current_hash
+            _save_dataset_hashes(dataset_hashes, paths) # Save updated hashes immediately
+            logger.info(f"Updated stored hash for session {session_id} to {current_hash}.")
         else:
-            # Bill is new (not in previous data), need to fetch details
-            bill_ids_to_fetch_details.append(bill_id)
-            logger.debug(f"Bill {bill_id}: New bill found. Fetching details.")
-
-    bills_removed_count = len(previous_bills_data) - len(reused_bills) - len(bill_ids_to_fetch_details)
-    if bills_removed_count > 0:
-        logger.info(f"{bills_removed_count} bills present in previous data but not in current masterlist raw (likely withdrawn/removed). They will be excluded.")
-
-    logger.info(f"Bills to fetch details for: {len(bill_ids_to_fetch_details)}. Bills to reuse: {len(reused_bills)}.")
+            logger.error(f"Failed to download or extract dataset for session {session_id}. Cannot process bills.")
+            # Save empty lists to mark attempt, prevent reprocessing unless hash changes
+            save_json([], session_bills_json_path)
+            save_json([], session_sponsors_json_path)
+            save_json([], session_votes_json_path)
+            # Don't update hash store on failure.
+            return
+    else:
+        # No download needed, use existing path
+        logger.info(f"Dataset hash matches stored hash ({current_hash}) and extracted data exists. Using existing data.")
+        dataset_bill_dir = extracted_bill_path_check
 
     # --- 4. Fetch Details for New/Changed Bills (getBill) ---
     newly_fetched_bills = []
     bill_fetch_errors = 0
 
-    for bill_id in tqdm(bill_ids_to_fetch_details, desc=f"Fetching bill details for session {session_id} ({year})", unit="bill"):
+    for bill_id in tqdm(bill_stubs_from_api, desc=f"Fetching bill details for session {session_id} ({year})", unit="bill"):
         bill_params = {'id': bill_id}
         try:
             bill_data = fetch_api_data('getBill', bill_params)
@@ -1800,6 +2028,7 @@ if __name__ == "__main__":
     parser.add_argument('--fetch-texts', action='store_true', help='Fetch full bill text documents via API (requires --run bills)')
     parser.add_argument('--fetch-amendments', action='store_true', help='Fetch full bill amendment documents via API (requires --run bills)')
     parser.add_argument('--fetch-supplements', action='store_true', help='Fetch full bill supplement documents via API (requires --run bills)')
+    parser.add_argument('--force-dataset-download', action='store_true', help='Force download of datasets even if hash matches (requires --run bills)')
 
     args = parser.parse_args()
 
@@ -1814,6 +2043,7 @@ if __name__ == "__main__":
 
     years = range(args.start_year, args.end_year + 1)
     sessions = []
+    dataset_hashes: Dict[int, str] = {} # Store dataset hashes loaded/updated during run
 
     # Fetch sessions if needed by the requested action
     if args.run not in ['scrape_members', 'match_members', 'consolidate_members']:
@@ -1825,6 +2055,14 @@ if __name__ == "__main__":
             test_logger.info(f"Fetched {len(sessions)} sessions.")
             logging.shutdown()
             sys.exit(0)
+
+    # Load existing dataset hashes if running 'bills'
+    if args.run == 'bills':
+        dataset_hashes = _load_dataset_hashes(paths)
+        test_logger.info(f"Loaded {len(dataset_hashes)} stored dataset hashes.")
+        if args.force_dataset_download:
+            test_logger.warning("Forcing dataset download - stored hashes will be ignored for download decision.")
+            dataset_hashes = {} # Clear loaded hashes to force download
 
     # Pass fetch flags if running 'bills' action
     fetch_flags = {'fetch_texts': False, 'fetch_amendments': False, 'fetch_supplements': False}
@@ -1846,7 +2084,9 @@ if __name__ == "__main__":
 
         elif args.run == 'bills':
             for session in sessions:
-                collect_bills_votes_sponsors(session, paths, fetch_flags=fetch_flags) # Pass flags here
+                # Pass the loaded (or cleared) dataset_hashes dict
+                collect_bills_votes_sponsors(session, paths, dataset_hashes, fetch_flags=fetch_flags, force_download=args.force_dataset_download)
+            # Note: _save_dataset_hashes is called *within* collect_bills_votes_sponsors on success now
 
         elif args.run == 'consolidate_api':
             # Define columns for each consolidated file (ensure these match processing logic)

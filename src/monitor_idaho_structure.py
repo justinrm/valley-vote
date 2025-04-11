@@ -8,15 +8,24 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from urllib.parse import urljoin
+import hashlib
+import json
 
 # Third-party imports
 from bs4 import BeautifulSoup
 
 # Local imports
-from src.utils import setup_logging, fetch_page
+from .config import (
+    ID_HOUSE_COMMITTEES_URL,
+    ID_SENATE_COMMITTEES_URL,
+    MONITOR_LOG_FILE
+)
+from .utils import setup_logging, fetch_page, load_json, save_json, setup_project_paths
 
 # --- Configure Logging ---
-logger = setup_logging('monitor_idaho_structure.log')
+# Fix: Get paths and use log_dir
+paths = setup_project_paths() # Define paths globally or pass to functions
+logger = setup_logging(MONITOR_LOG_FILE, paths['log']) # Pass log_dir
 
 # --- Configuration ---
 # URLs to monitor (Matches data_collection.py's targets)

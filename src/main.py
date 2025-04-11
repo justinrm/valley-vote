@@ -10,7 +10,9 @@ import src.scrape_finance_idaho as scrape_finance_idaho
 import src.match_finance_to_leg as match_finance_to_leg
 import src.monitor_idaho_structure as monitor_idaho_structure
 
-logger = setup_logging('valley_vote.log')
+# Setup paths first to get log directory
+paths = setup_project_paths()
+logger = setup_logging('valley_vote.log', paths['log'])
 
 def main():
     parser = argparse.ArgumentParser(
@@ -37,6 +39,14 @@ def main():
                         help='Skip matching finance data to legislators')
     parser.add_argument('--monitor-only', action='store_true',
                         help='Only run website structure monitoring')
+    parser.add_argument('--force-dataset-download', action='store_true',
+                        help='Force download of LegiScan datasets even if hash matches')
+    parser.add_argument('--fetch-texts', action='store_true',
+                        help='Fetch full bill text documents via LegiScan API')
+    parser.add_argument('--fetch-amendments', action='store_true',
+                        help='Fetch full bill amendment documents via LegiScan API')
+    parser.add_argument('--fetch-supplements', action='store_true',
+                        help='Fetch full bill supplement documents via LegiScan API')
     
     args = parser.parse_args()
     
@@ -64,10 +74,30 @@ def main():
                 # Collect legislators
                 data_collection.collect_legislators(args.state, sessions, paths)
                 
+                # Load dataset hashes for bill collection
+                dataset_hashes = data_collection._load_dataset_hashes(paths)
+                logger.info(f"Loaded {len(dataset_hashes)} stored dataset hashes for bill collection.")
+                
+                # Prepare fetch flags for document collection if needed
+                fetch_flags = {
+                    'fetch_texts': args.fetch_texts,
+                    'fetch_amendments': args.fetch_amendments,
+                    'fetch_supplements': args.fetch_supplements
+                }
+                
+                if args.force_dataset_download:
+                    logger.warning("Forcing dataset download - stored hashes will be ignored for download decision.")
+                
                 # Collect committee definitions, bills, votes, and sponsors for each session
                 for session in sessions:
                     data_collection.collect_committee_definitions(session, paths)
-                    data_collection.collect_bills_votes_sponsors(session, paths)
+                    data_collection.collect_bills_votes_sponsors(
+                        session, 
+                        paths, 
+                        dataset_hashes, 
+                        fetch_flags=fetch_flags,
+                        force_download=args.force_dataset_download
+                    )
                 
                 # Define columns for consolidation (matching data_collection.py definitions)
                 committee_cols = ['committee_id', 'name', 'chamber', 'chamber_id', 'session_id', 'year']

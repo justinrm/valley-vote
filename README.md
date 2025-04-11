@@ -21,7 +21,7 @@ This project starts with Idaho as a case study, with the potential to expand to 
 
 *   **Automated Data Collection (LegiScan API):**
     *   Retrieves comprehensive legislative data (sessions, legislators, bills, votes, sponsors, committees).
-    *   Uses LegiScan's `getMasterListRaw` and `change_hash` comparison for efficient fetching of only new or updated bill details.
+    *   Uses LegiScan's Bulk Dataset API (`getDatasetList`, `getDataset`) for efficient fetching of full session bill data, comparing dataset hashes to avoid redundant downloads.
     *   Fetches full **Bill Text, Amendment, and Supplement** documents (optional via command-line flags).
 *   **Automated Data Collection (Web Scraping - Idaho):**
     *   Scrapes **Idaho Legislature website** for current committee memberships.
