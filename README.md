@@ -143,7 +143,7 @@ This project starts with Idaho as a case study, with the potential to expand to 
 
 1.  **Clone the Repository:**
     ```bash
-    git clone https://github.com/your-username/valley-vote.git # Replace with actual repo URL
+    git clone https://github.com/justinrm/valley-vote.git
     cd valley-vote
     ```
 
