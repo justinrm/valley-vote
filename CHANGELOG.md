@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Efficient fetching of LegiScan bill data using `getMasterListRaw` and `change_hash` comparison, reducing redundant API calls (`src/data_collection.py`).
 - Ability to fetch full bill texts, amendments, and supplements via LegiScan API using `--fetch-*` flags (`src/data_collection.py`).
 - Initial `CHANGELOG.md` file to track project changes.
+- Script (`src/parse_finance_idaho_manual.py`) to parse, combine, and clean manually downloaded Idaho campaign finance CSV files.
 
 ### Changed
 - Refined `README.md` with improved structure, clarity, accuracy, and reflection of current project status (LegiScan optimization, paused finance scraping).

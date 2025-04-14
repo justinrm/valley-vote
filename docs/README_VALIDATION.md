@@ -1,163 +1,235 @@
-# Idaho SOS Sunshine Portal Scraper Validation
+# Validation Scripts for Valley Vote Data Collection
 
-This directory contains scripts to help validate and refine the Idaho SOS Sunshine Portal scraper. These scripts are designed to help test and improve the scraper's functionality, particularly focusing on:
-
-1. Form field validation and search functionality
-2. Link finding and extraction
-3. CSV parsing and data standardization
+This document details the validation scripts for the Valley Vote data collection modules, particularly for the Idaho SOS Sunshine Portal finance data scraper.
 
 ## Validation Scripts
 
-### 1. `test_finance_scraper.py`
+The following scripts are available for validation:
 
-This script helps validate the search functionality and form field handling.
+### `test_finance_scraper.py`
 
-**Usage:**
+Validates the search functionality and form field handling of the finance scraper.
+
 ```bash
-# Inspect form fields on the search page
-python src/test_finance_scraper.py --inspect-form
+# Basic usage - validate all aspects of the finance scraper
+python -m tests.test_finance_scraper
 
-# Inspect search results page
-python src/test_finance_scraper.py --inspect-results
+# Validate only the search functionality
+python -m tests.test_finance_scraper --validate-search
 
-# Test search functionality with sample data
-python src/test_finance_scraper.py --test-search
+# Validate only form field handling
+python -m tests.test_finance_scraper --validate-forms
 
-# Test a specific case
-python src/test_finance_scraper.py --test-case "John Smith" 2022 contributions
-
-# Override data directory
-python src/test_finance_scraper.py --test-search --data-dir /path/to/data
+# Validate with a specific config file
+python -m tests.test_finance_scraper --config path/to/config.json
 ```
 
-**Features:**
-- Inspects form fields to identify correct field names
-- Tests search functionality with sample data
-- Logs detailed information about the search process
-- Saves debug information for further inspection
+### `validate_csv_parsing.py`
 
-### 2. `validate_csv_parsing.py`
+Validates the CSV parsing functionality of the data collection modules.
 
-This script helps validate and refine CSV parsing functionality.
-
-**Usage:**
 ```bash
-# Basic CSV parsing
-python src/validate_csv_parsing.py path/to/file.csv
+# Basic usage - validate CSV parsing with default settings
+python -m tests.validate_csv_parsing --file path/to/csv_file.csv
 
-# Specify data type
-python src/validate_csv_parsing.py path/to/file.csv --data-type contributions
+# Specify data types for columns
+python -m tests.validate_csv_parsing --file path/to/csv_file.csv --types "amount:float,date:date,id:int"
 
-# Specify encoding
-python src/validate_csv_parsing.py path/to/file.csv --encoding utf-8
-
-# Suggest column mapping
-python src/validate_csv_parsing.py path/to/file.csv --suggest-mapping
-
-# Override data directory
-python src/validate_csv_parsing.py path/to/file.csv --data-dir /path/to/data
+# Suggest column mappings based on content
+python -m tests.validate_csv_parsing --file path/to/csv_file.csv --suggest-mappings
 ```
 
-**Features:**
-- Detects file encoding
-- Tries multiple encodings if detection fails
-- Analyzes CSV structure (columns, data types, etc.)
-- Tests column mapping
-- Suggests column mappings based on content
-- Saves suggested mappings to JSON files
+### `validate_link_finding.py`
 
-### 3. `validate_link_finding.py`
+Validates the link finding functionality used in web scraping modules.
 
-This script helps validate and refine link finding functionality.
-
-**Usage:**
 ```bash
-# Basic link finding
-python src/validate_link_finding.py --name "John Smith" --year 2022
+# Basic usage - validate link finding on a specific URL
+python -m tests.validate_link_finding --url https://example.com/page
 
-# Specify data type
-python src/validate_link_finding.py --name "John Smith" --year 2022 --data-type expenditures
+# Specify expected link patterns
+python -m tests.validate_link_finding --url https://example.com/page --patterns "pdf$,/reports/,\.xlsx$"
 
-# Override data directory
-python src/validate_link_finding.py --name "John Smith" --year 2022 --data-dir /path/to/data
+# Validate with specific data types
+python -m tests.validate_link_finding --url https://example.com/page --types "pdf,excel,zip"
 ```
 
-**Features:**
-- Inspects page structure
-- Finds all possible download links
-- Tests link finding strategies
-- Saves debug information for further inspection
+### `validate_news_collection.py`
+
+Validates the news article collection functionality.
+
+```bash
+# Basic usage - validate news collection for specific bills
+python -m tests.validate_news_collection --bills "H0001,S0002,H0055"
+
+# Validate with sample queries
+python -m tests.validate_news_collection --sample-queries "Idaho education bill,property tax Idaho,gun legislation"
+
+# Validate content extraction
+python -m tests.validate_news_collection --validate-extraction --urls "https://example.com/article1,https://example.com/article2"
+```
+
+### `validate_amendment_tracking.py`
+
+Validates the amendment tracking functionality.
+
+```bash
+# Basic usage - validate amendment tracking for specific bills
+python -m tests.validate_amendment_tracking --bills "H0001,S0002,H0055"
+
+# Validate text comparison functionality
+python -m tests.validate_amendment_tracking --validate-comparison
+
+# Validate with sample amendment documents
+python -m tests.validate_amendment_tracking --sample-docs "path/to/amendment1.pdf,path/to/amendment2.pdf"
+```
 
 ## Validation Process
 
-To thoroughly validate the scraper, follow these steps:
+For a thorough validation of the data collection modules, follow these steps:
 
-1. **Form Field Validation:**
-   ```bash
-   python src/test_finance_scraper.py --inspect-form
-   ```
-   This will help identify the correct form field names and structure.
+### 1. Form Field Validation
 
-2. **Link Finding Validation:**
-   ```bash
-   python src/validate_link_finding.py --name "John Smith" --year 2022
-   ```
-   This will help identify the correct way to find download links.
+If a module interacts with web forms, validate the form field handling:
 
-3. **CSV Parsing Validation:**
-   ```bash
-   python src/validate_csv_parsing.py path/to/downloaded.csv --suggest-mapping
-   ```
-   This will help identify the correct column mappings and data types.
+```bash
+python -m tests.test_finance_scraper --validate-forms
+```
 
-4. **End-to-End Testing:**
-   ```bash
-   python src/test_finance_scraper.py --test-search
-   ```
-   This will test the entire scraping process with sample data.
+This verifies:
+- All required fields are identified
+- Field types are correctly detected
+- Validation rules are enforced
+- Form submission works correctly
+
+### 2. Link Finding Validation
+
+For modules that find and follow links:
+
+```bash
+python -m tests.validate_link_finding --url https://example.com/relevant_page
+```
+
+This verifies:
+- Links are correctly identified
+- Filters work properly
+- Relative/absolute URL handling works
+
+### 3. CSV Parsing Validation
+
+For modules that process CSV files:
+
+```bash
+python -m tests.validate_csv_parsing --file path/to/sample.csv
+```
+
+This verifies:
+- Headers are correctly identified
+- Data types are properly inferred
+- Row handling is correct
+- Empty/special values are handled
+
+### 4. News Collection Validation
+
+For the news collection module:
+
+```bash
+python -m tests.validate_news_collection --sample-queries "relevant search term"
+```
+
+This verifies:
+- API connections work
+- Query generation is effective
+- Results are properly processed
+- Article extraction works
+
+### 5. Amendment Tracking Validation
+
+For the amendment tracking module:
+
+```bash
+python -m tests.validate_amendment_tracking --validate-comparison
+```
+
+This verifies:
+- Document retrieval works
+- Text extraction is accurate
+- Text comparison correctly identifies changes
+- Results are properly formatted
+
+### 6. End-to-End Testing
+
+Finally, perform an end-to-end test to ensure all components work together:
+
+```bash
+python -m tests.validate_e2e --modules "finance,news,amendments" --sample-bills "H0001,S0002"
+```
+
+This verifies the full data collection pipeline works correctly from start to finish.
 
 ## Debug Information
 
-All validation scripts save debug information to the `data/artifacts/debug` directory. This information can be used to:
+All validation scripts save detailed debug information to:
 
-- Inspect HTML structure
-- Identify form fields
-- Find download links
-- Analyze CSV structure
-- Suggest column mappings
+```
+data/debug/validation/{module_name}/{timestamp}/
+```
+
+This includes:
+- Screenshots (for web-based modules)
+- Raw responses
+- Intermediate processing results
+- Validation reports
 
 ## Logging
 
-All validation scripts log detailed information to log files in the `data/log` directory:
+Validation scripts generate detailed logs to:
 
-- `test_finance_scraper.log`
-- `validate_csv_parsing.log`
-- `validate_link_finding.log`
+```
+logs/validation_{module}_{timestamp}.log
+```
 
-These logs contain detailed information about the validation process, including:
+Set the log level using the `--log-level` parameter:
 
-- Form field inspection
-- Link finding attempts
-- CSV parsing attempts
-- Column mapping suggestions
-- Error messages and warnings
+```bash
+python -m tests.test_finance_scraper --log-level DEBUG
+```
 
 ## Troubleshooting
 
-If you encounter issues with the validation scripts:
+If validation fails, check the following:
 
-1. Check the log files for detailed error messages
-2. Inspect the debug information saved to the `data/artifacts/debug` directory
-3. Try different encodings for CSV parsing
-4. Try different form field names for search
-5. Try different link finding strategies
+1. **API Access Issues**
+   - Verify API keys are valid
+   - Check rate limits
+   - Confirm network connectivity
+
+2. **Website Structure Changes**
+   - Check if selectors need updating
+   - Verify URL patterns are still valid
+   - Update expected form fields if needed
+
+3. **Data Format Changes**
+   - Update expected column names
+   - Adjust data type mappings
+   - Modify parsing logic if needed
+
+4. **Environment Issues**
+   - Ensure dependencies are installed
+   - Check Python version compatibility
+   - Verify browser drivers are up-to-date (for web scraping)
 
 ## Contributing
 
-When contributing to the scraper:
+To add a new validation script:
 
-1. Run the validation scripts before making changes
-2. Document any changes to form field names or link finding strategies
-3. Update column mappings if necessary
-4. Test with real data from the Idaho SOS Sunshine Portal
-5. Update the validation scripts if necessary 
+1. Create a new Python file in the `tests/` directory
+2. Follow the validation script template
+3. Implement the necessary validation logic
+4. Add documentation to this README
+
+For modifying existing scripts:
+
+1. Maintain backward compatibility when possible
+2. Update this README with any parameter changes
+3. Add tests for new functionality 

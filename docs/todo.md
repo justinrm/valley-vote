@@ -8,6 +8,7 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 *   `[ ]` = Not Started
 *   `[P]` = Paused / Blocked
 *   `[R]` = Refactored / Replaced
+*   `[?]` = Status Uncertain / Deprecated?
 
 ## Phase 1: Core Data Acquisition & Initial Processing
 
@@ -32,41 +33,58 @@ This document tracks the tasks required to build and improve the Valley Vote pla
     -   [x] Implement consolidation of yearly matched membership data.
     -   [~] **Monitor & Maintain:** Regularly check Idaho Legislature website structure and update scraper (`monitor_idaho_structure.py`). Needs automated checks or scheduled runs.
 
--   **Idaho Campaign Finance Data:**
-    -   [P] **Overall Status: Paused Automated Scraping** - Pivoting to manually acquired data via records request due to Sunshine Portal scraping challenges. Automated Playwright-based scraping logic (`scrape_finance_idaho.py`, `test_finance_scraper.py`) is retained for reference but is not currently active or maintained.
-    -   [x] **Initial Setup (Playwright - for potential future use or reference):**
+-   **Campaign Finance Data Collection:**
+    -   [x] **Generic API Collection (`finance_collection.py`):**
+        -   [x] Implemented module for campaign finance data collection via configurable API.
+        -   [x] Implemented robust API fetching with retry logic and error handling.
+        -   [x] Implemented candidate list retrieval functionality.
+        -   [x] Implemented contribution data collection for candidates.
+        -   [x] Implemented data consolidation across multiple years.
+        -   [x] Implemented main collection pipeline with structured workflow.
+    -   [P] **Original Idaho Finance Portal Scraping (`scrape_finance_idaho.py`):**
         -   [x] Added Playwright dependency (`requirements.txt`).
         -   [x] Set up virtual environment (`venv`).
         -   [x] Created basic finance scraper structure (`scrape_finance_idaho.py`).
         -   [x] Created validation/test script (`test_finance_scraper.py`).
-    -   [P] **Refactor & Validate Scraper (Playwright - relevant if scraping is resumed):**
-        -   [x] Refactor `--inspect-form` to use Playwright, identify initial elements.
-        -   [x] Refactor `--inspect-results` to use Playwright.
-            -   [x] Implement robust selector for name/committee input (`#panel-campaigns-content input[role="combobox"]...`).
-            -   [x] Implement focus logic for hidden input (`.focus()` with JS fallback).
-            -   [x] Implement typing/filling name input.
-            -   [ ] (Minor) Handle dropdown option selection gracefully.
-            -   [x] Implement locating and filling date inputs.
-            -   [x] Implement locating and clicking search button.
-            -   [x] Implement waiting for/detecting results area.
-            -   [x] Implement finding results items count.
-            -   [P] **Implement Finding Export Link/Button:** Timeout occurred during previous attempts.
-        -   [P] Implement `--test-search` function using validated Playwright logic.
-        -   [P] Refactor `scrape_finance_idaho.py` main scraping loop.
-        -   [P] Implement robust error handling and retry logic within Playwright interactions.
-    -   [ ] **Parse Manually Acquired Data:**
-        -   [~] Develop parser script (`parse_finance_idaho_manual.py` or similar) to read received CSV/other format.
-        -   [ ] Implement robust data cleaning (amounts, dates, names, addresses, etc.) based on actual data format.
-        -   [ ] Standardize column names based on `config.py` maps or define new ones.
-        -   [ ] Handle potential variations in file structure/format.
-        -   [ ] Save cleaned/standardized data to `processed/` directory (e.g., CSV).
-    -   [~] **Develop Robust Matching (`match_finance_to_leg.py`):**
+        -   [P] **Status:** Paused automated scraping via Playwright due to website complexity. Retained for reference.
+    -   [x] **Parse Manually Acquired Idaho Data (`parse_finance_idaho_manual.py` - Phase 1):**
+        -   [x] Developed parser script (`parse_finance_idaho_manual.py`) to read CSVs.
+        -   [x] Identified candidate, committee, and report files from downloaded data.
+        -   [x] Implemented handling for header rows on the second line.
+        -   [x] Implemented logic to load reports, candidates, and committees into appropriate data structures (list of dicts, dict keyed by ID).
+        -   [x] Implemented merging logic based on `Filing Entity Id` / `Filing Entity ID`.
+        -   [x] Added handling for unmatched reports and logging.
+        -   [x] Implemented saving of combined/enriched data to JSON.
+    -   [x] **Process & Categorize Manually Acquired Idaho Data (`parse_finance_idaho_manual.py` - Refactored):**
+        -   [x] Refactored `parse_finance_idaho_manual.py` to categorize all downloaded CSVs (Transactions, Committees, Candidates, Reports, Filings, Other).
+        -   [x] Implemented specific parsing logic per category (e.g., amount/date cleaning for transactions).
+        -   [x] Handled encoding issues (UTF-8/latin-1 fallback).
+    -   [~] **Develop Robust Finance Matching (`match_finance_to_leg.py`):**
         -   [x] Initial fuzzy matching logic implemented (`thefuzz`).
         -   [x] Centralized `clean_name` utility in `src/utils.py`.
         -   [~] **Refine Strategy:** Improve matching based on manual data format (consider committee indicators, election year/office, filer IDs, manual review steps). Needs validation with actual manual data.
         -   [ ] **Validate Matches:** Perform spot-checks/build validation set using the manual data.
     -   [ ] Extract and standardize donor details (name, address, employer, occupation) for categorization/analysis from manual data.
     -   [ ] (Optional) Extract and standardize expenditure data more thoroughly from manual data.
+
+-   **Amendment Collection & Analysis (`amendment_collection.py`):**
+    -   [x] **Module Implementation:** Create dedicated module for bill amendment tracking.
+    -   [x] Implement amendment collection for specific bills.
+    -   [x] Extract content from amendment files.
+    -   [x] Implement bill text and amendment comparison function.
+    -   [x] Process amendments across multiple sessions/years.
+    -   [x] Consolidate amendment data into analysis-ready datasets.
+    -   [x] Implement main collection pipeline for amendments.
+
+-   **News Article Collection (`news_collection.py`):**
+    -   [x] **Module Implementation:** Create dedicated module for news articles related to legislation.
+    -   [x] Implement news API integration with robust retry logic.
+    -   [x] Implement search functionality for news articles related to bills.
+    -   [x] Generate intelligent search queries based on bill information.
+    -   [x] Implement full text extraction from article URLs.
+    -   [x] Process and consolidate article data into analysis-ready datasets.
+    -   [x] Use NLP techniques (NLTK) to improve search and text processing.
+    -   [x] Implement main collection pipeline for news data.
 
 -   **District Demographics Data (`process_demographics_idaho.py` - Planned Script):**
     -   [ ] **Identify Data Sources:** Pinpoint specific Census ACS tables and TIGER/Line shapefiles for relevant ID legislative districts/years.
@@ -85,6 +103,8 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 
 -   **General Acquisition Improvements & Refactoring:**
     -   [x] Refactor Bill collection to use LegiScan Bulk Dataset API (`getDatasetList`/`getDataset`).
+    -   [x] Add utility functions for text processing (`clean_text`).
+    -   [x] Update configuration settings for new data sources (Finance API, News API).
     -   [ ] Implement caching for API calls and web requests (`requests-cache`).
     -   [ ] Add configuration options for state-specific parameters to facilitate expansion.
     -   [ ] Add more robust error logging and notification for failed data acquisition.
@@ -96,14 +116,14 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 
 -   [x] **Create `data_preprocessing.py` script.**
 -   [x] **Implement Master Data Loading:** Load all relevant processed CSVs.
--   [~] **Implement Robust Data Linking & Merging:** Finalize/apply matching, verify keys, join logically.
+-   [~] **Implement Robust Data Linking & Merging:** Verify keys, join logically (Needs validation with manual finance data).
 -   [~] **Implement Data Cleaning & Preparation:** Handle missing values, standardize formats, filter votes, address inconsistencies.
--   [~] **Implement Feature Engineering:** 
-    -   [~] Legislator features (seniority, party, influence, etc.)
-    -   [~] Bill features (subject, complexity, etc.)
-    -   [~] Committee features
-    -   [ ] External Context (Demographics, Finance, Elections)
-    -   [ ] Interaction features
+-   [~] **Implement Feature Engineering (Based on `docs/feature_engineering.md`):**
+    -   [x] Legislator Features (Implemented): Seniority, Party Loyalty, Influence Score, Roll Call Participation, Bipartisanship Score.
+    -   [x] Bill Features (Implemented): Subject Vector (TF-IDF), Bill Complexity Score, Bill Controversy Score.
+    -   [ ] Committee Features (Membership, Leadership roles) - Needs implementation/integration.
+    -   [ ] External Context Features (Planned): Demographics, Processed Finance Data, Election Results.
+    -   [ ] Interaction Features (Planned).
 -   [~] **Generate Final Feature Matrix:** Create dataset (`voting_feature_matrix.csv`) with target and features.
 -   [ ] **Validate Generated Features:** Ensure consistency, normality, and significance.
 -   [ ] **Implement Feature Selection:** Identify and select most important features.
@@ -205,17 +225,36 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 -   [~] **Write/Update Script/Module Documentation:**
     -   [~] `data_collection.py` - Documentation updated but needs enhancements
     -   [~] `scrape_finance_idaho.py` - Documented but paused
-    -   [~] `data_preprocessing.py` - Basic documentation completed, needs updates with feature engineering details
-    -   [ ] Other modules - Require documentation updates
--   [~] **Document Data Schema:** `docs/data_schema.md` - Initial version created, needs updates.
--   [~] **Document Feature Engineering:** `docs/feature_engineering.md` - Initial version created, needs validation against implemented features.
+    -   [~] `data_preprocessing.py` - Basic documentation completed, needs updates with specific feature engineering details
+    -   [x] `finance_collection.py` - Documented in code, needs dedicated `README_FINANCE.md`
+    -   [x] `news_collection.py` - Documented in code, needs dedicated `README_NEWS.md`
+    -   [x] `amendment_collection.py` - Documented in code, needs dedicated `README_AMENDMENTS.md`
+    -   [ ] Other modules (`utils.py`, `config.py`, `main.py`) - Require documentation updates/review
+-   [~] **Document Data Schema:** `docs/data_schema.md` - Initial version created, needs updates for Finance, News, Amendments, and Feature Matrix
+-   [~] **Document Feature Engineering:** `docs/feature_engineering.md` - Initial version created, needs validation against implemented features in `data_preprocessing.py`
 -   [ ] **Document API Endpoints:** Generate/maintain API docs.
 -   [ ] **Document Deployment & Setup.**
 -   [~] **Add Code Comments & Docstrings.**
--   [ ] **Implement Unit/Integration Tests (`pytest`):** API parsing, Scraper parsing, Fuzzy matching, Data merging, Feature calcs, API endpoints, Chatbot logic, Frontend components.
+-   [~] **Implement Unit/Integration Tests (`pytest`):**
+    -   [~] Core utilities (`test_utils.py`)
+    -   [~] LegiScan client logic (`test_legiscan_client.py`)
+    -   [~] Data collection orchestration (`test_data_collection.py`)
+    -   [~] Finance data collection (`test_finance_collection.py` - In Progress)
+    -   [~] News data collection (`test_news_collection.py` - In Progress: Tested `generate_queries_for_bill`, `fetch_news_data`, `search_news_articles`, `collect_news_for_bill`, `collect_news_for_bills`)
+    -   [ ] Amendment data collection (`test_amendment_collection.py`)
+    -   [~] Matching logic (`test_matching.py`)
+    -   [~] Monitoring logic (`test_monitoring.py`)
+    -   [P] Paused finance scraper (`test_finance_scraper.py`)
+    -   [ ] Manual finance parsing (`test_parse_finance_manual.py`)
+    -   [ ] Data preprocessing (`test_data_preprocessing.py`)
+    -   [ ] Modeling (`test_model.py`)
+    -   [ ] API Endpoints
+    -   [ ] Frontend Components
+    -   [ ] Chatbot Logic
 -   [x] **Maintain `requirements.txt`:** Dependencies updated.
--   [~] **Refactor Code:** Periodically review/improve (LegiScan Bulk API implemented for Bills).
-    -   [~] Update `main.py` to use new `collect_bills_votes_sponsors` signature and manage `dataset_hashes`.
+-   [~] **Refactor Code:** Periodically review/improve.
+    -   [x] LegiScan Bulk API implemented for Bills.
+    -   [x] Code modularized (e.g., `legiscan_client.py`, `idaho_scraper.py`).
     -   [ ] Consider using Bulk Dataset API for Legislator/Person data (currently uses `getSessionPeople`).
     -   [ ] Consider using Bulk Dataset API for Vote/RollCall data (currently uses `getRollCall` individually).
 -   [~] **Address TODOs/FIXMEs in Code.**
@@ -223,12 +262,16 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 -   [ ] **Implement Code Quality Checks:** Add linting, formatting, and type checking tools.
 -   [ ] **Create Contributing Guidelines:** Instructions for contributors.
 
-## Recent Updates (Last Updated: [Current Date])
+## Recent Updates (Last Updated: May 2024)
 
--   Updated todo.md to reflect current project status
--   Updated LegiScan API section to mark Bulk Dataset API implementation as completed
--   Enhanced data preprocessing section with more specific tasks
--   Added new tasks for data quality checks and feature validation
--   Updated documentation section with current status
--   Marked Playwright-based scraping as paused
--   Added new tasks for model documentation and versioning
+-   Created and implemented new data collection modules:
+    -   `finance_collection.py` - For campaign finance data collection via API
+    -   `news_collection.py` - For collecting news articles related to legislation
+    -   `amendment_collection.py` - For collecting and analyzing bill amendments
+-   Added configuration settings for new APIs in `config.py`
+-   Added new utility function `clean_text()` in `utils.py`
+-   Updated TODO list to reflect these new modules and their functionality
+-   Consolidated data collection capabilities to support multiple data sources
+-   Enhanced project structure to enable more comprehensive data analysis
+-   Updated TODO list to reflect new modules, clarified finance status, refined feature engineering status
+-   Added mentions for validation scripts and unlisted utility scripts

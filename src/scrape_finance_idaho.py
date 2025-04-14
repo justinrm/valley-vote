@@ -50,7 +50,11 @@ from .utils import (
     fetch_page,
     setup_project_paths
 )
-from .data_collection import FINANCE_COLUMN_MAPS
+# Remove incorrect import
+# from .data_collection import FINANCE_COLUMN_MAPS 
+
+# Correct import from config
+from .config import FINANCE_COLUMN_MAPS
 
 # --- Custom Exceptions ---
 class ScrapingStructureError(Exception):
@@ -637,17 +641,22 @@ def download_and_extract_finance_data(
             return None
             
         try:
-            # Try UTF-8 first
-            data_df = pd.read_csv(raw_path, encoding='utf-8', low_memory=False)
-            logger.debug(f"Successfully read CSV data using utf-8 from {raw_path.name}")
-        except UnicodeDecodeError:
+            # Try reading with different encodings
             try:
-                # Try latin-1 as fallback
-                data_df = pd.read_csv(raw_path, encoding='latin-1', low_memory=False)
-                logger.debug(f"Successfully read CSV data using latin-1 from {raw_path.name}")
-            except Exception as e:
-                logger.error(f"Failed to read CSV data: {e}")
-                return None
+                # Attempt UTF-8 first
+                data_df = pd.read_csv(raw_path, encoding='utf-8', low_memory=False, skiprows=1)
+                logger.info(f"Successfully read raw finance data ({data_type}) from {raw_path} using UTF-8 (skipped header row).")
+            except UnicodeDecodeError:
+                 try:
+                     # Fallback to latin-1
+                     data_df = pd.read_csv(raw_path, encoding='latin-1', low_memory=False, skiprows=1)
+                     logger.info(f"Successfully read raw finance data ({data_type}) from {raw_path} using latin-1 (skipped header row).")
+                 except Exception as e_read2:
+                     logger.error(f"Failed to read raw finance data ({data_type}) from {raw_path} with multiple encodings: {e_read2}", exc_info=True)
+
+        except Exception as e_read:
+            logger.error(f"Error reading raw finance data: {e_read}", exc_info=True)
+            return None
     
     # Check if DataFrame is empty
     if data_df is None or data_df.empty:

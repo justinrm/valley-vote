@@ -30,8 +30,8 @@ pyproj~=3.6.1             # Projections and coordinate transformations
 # --- Modeling & Interpretation (Planned) ---
 xgboost~=2.0.3            # Gradient Boosting model (Primary planned model)
 shap~=0.45.0              # Model interpretation (SHAP values)
-matplotlib~=3.8.3         # Plotting library (for evaluation, SHAP plots)
-seaborn~=0.13.2           # Enhanced plotting based on matplotlib
+matplotlib         # Plotting library (for evaluation, SHAP plots)
+seaborn           # Enhanced plotting based on matplotlib
 
 # --- Optional Tools (Based on Planned Features/Workflow) ---
 # optuna~=3.6.1             # (Optional) Hyperparameter optimization framework

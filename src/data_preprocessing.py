@@ -90,18 +90,31 @@ class DataPreprocessor:
 
 
         # Define which files are critical for the core pipeline
-        _load_csv('bills.csv', 'bills_df', critical=True)
-        _load_csv('votes.csv', 'votes_df', critical=True)
-        _load_csv('legislators.csv', 'legislators_df', critical=True)
-        _load_csv('roll_calls.csv', 'roll_calls_df', critical=True) # Often needed for vote dates/outcomes
-        _load_csv('sponsors.csv', 'sponsors_df') # Often useful, maybe not strictly critical
-        _load_csv('committees.csv', 'committees_df')
-        _load_csv('committee_memberships_matched.csv', 'committee_membership_df') # Needed for committee counts
+        # Hardcoding filenames for ID 2023 for now
+        # TODO: Make this dynamic based on state/year parameters
+        state = 'ID' # Example, should be passed or detected
+        year = 2022 # Target year with likely non-empty data
+        consolidated_suffix = f"_{year}_{state}"
+
+        _load_csv(f'bills{consolidated_suffix}.csv', 'bills_df', critical=True)
+        _load_csv(f'votes{consolidated_suffix}.csv', 'votes_df', critical=True)
+        # Load legislators without year suffix
+        _load_csv(f'legislators_{state}.csv', 'legislators_df', critical=True)
+        # Load roll calls - Mark as non-critical for now as it might be missing
+        _load_csv(f'roll_calls{consolidated_suffix}.csv', 'roll_calls_df', critical=False)
+        _load_csv(f'sponsors{consolidated_suffix}.csv', 'sponsors_df')
+        _load_csv(f'committees{consolidated_suffix}.csv', 'committees_df')
+        # Assuming committee memberships and finance are consolidated differently or not needed for this step
+        _load_csv(f'committee_memberships_scraped_consolidated_{state}_2020-2025.csv', 'committee_membership_df') # Assuming a consolidated name
 
         # Try loading matched finance, fallback to raw parsed finance if needed
-        if not _load_csv('finance_matched.csv', 'finance_df'):
-             logger.info("finance_matched.csv not found or failed to load, attempting to load finance_parsed.csv")
-             _load_csv('finance_parsed.csv', 'finance_df') # Or finance.csv depending on naming
+        # Assuming finance is consolidated with a different pattern
+        finance_consolidated_pattern = f'finance_matched_{state}_2020-2025.csv' # Example pattern
+        finance_parsed_pattern = f'finance_parsed_{state}_2020-2025.csv' # Example pattern
+
+        if not _load_csv(finance_consolidated_pattern, 'finance_df'):
+             logger.info(f"{finance_consolidated_pattern} not found or failed to load, attempting to load {finance_parsed_pattern}")
+             _load_csv(finance_parsed_pattern, 'finance_df')
 
         if not all_loaded_successfully:
              logger.critical("One or more critical data files failed to load. Preprocessing may fail or be incomplete.")
@@ -118,12 +131,20 @@ class DataPreprocessor:
 
         # Helper function for validation checks
         def _check_df(df: Optional[pd.DataFrame], name: str, required_cols: List[str], id_cols: List[str] = []) -> bool:
-            """Performs validation checks on a single DataFrame."""
+            """Performs validation checks on a single DataFrame. More robust to empty DFs."""
             nonlocal overall_valid
             if df is None:
-                # If the file wasn't critical during loading, not having it isn't necessarily invalid
                 logger.warning(f"{name} DataFrame is not loaded. Skipping validation.")
-                return True # Allow pipeline to continue, but be aware data is missing
+                return True
+
+            if df.empty:
+                logger.warning(f"{name} DataFrame is loaded but empty. Skipping detailed validation.")
+                # Still check if required columns *exist* even if empty
+                missing_cols = [col for col in required_cols if col not in df.columns]
+                if missing_cols:
+                    logger.error(f"{name} DataFrame (empty) missing required columns: {missing_cols}. Found: {df.columns.tolist()}")
+                    overall_valid = False # Mark overall as invalid if headers are missing
+                return True # Treat empty DF as 'valid enough' to continue for now
 
             df_valid = True
             # 1. Check required columns
@@ -131,8 +152,9 @@ class DataPreprocessor:
             if missing_cols:
                 logger.error(f"{name} DataFrame missing required columns: {missing_cols}. Found: {df.columns.tolist()}")
                 df_valid = False
+                overall_valid = False # Mark overall as invalid
 
-            # 2. Check for nulls in crucial ID columns
+            # 2. Check for nulls in crucial ID columns (only if column exists)
             if id_cols:
                 for id_col in id_cols:
                     if id_col in df.columns:
@@ -141,21 +163,20 @@ class DataPreprocessor:
                             logger.warning(f"{name} DataFrame has {num_nulls} null values in crucial ID column '{id_col}'.")
                             # Consider making this an error depending on the column's importance
                             # df_valid = False
-                    elif id_col in required_cols: # Only warn if the missing ID col was also required
+                    elif id_col in required_cols: # Only error if the missing ID col was required
                          logger.error(f"Required ID column '{id_col}' not found in {name} DataFrame for null check.")
-                         df_valid = False
+                         df_valid = False # Mark as invalid if required ID col is missing
+                         overall_valid = False
 
-
-            # 3. Check data types (example)
+            # 3. Check data types (example - keep commented)
             # if 'bill_id' in df.columns and not pd.api.types.is_integer_dtype(df['bill_id']):
             #     logger.warning(f"{name} column 'bill_id' is not integer type.")
 
-            if not df_valid:
-                overall_valid = False # Update overall validity flag
+            # Do not update overall_valid here based on df_valid, it was done above
             return df_valid
 
         # --- Define requirements and validate each essential DataFrame ---
-        # These checks assume the DataFrames exist because loading critical ones would have returned False
+        # Call _check_df for each
         _check_df(self.bills_df, "Bills",
                     required_cols=['bill_id', 'session_id', 'status', 'date_introduced'],
                     id_cols=['bill_id'])
@@ -165,11 +186,11 @@ class DataPreprocessor:
                     id_cols=['vote_id', 'roll_call_id', 'legislator_id'])
 
         _check_df(self.legislators_df, "Legislators",
-                    required_cols=['legislator_id', 'session_id', 'name', 'party_id'], # Assume party_id exists post-collection
+                    required_cols=['legislator_id', 'session_id', 'name', 'party_id'],
                     id_cols=['legislator_id'])
 
         _check_df(self.roll_calls_df, "Roll Calls",
-                    required_cols=['roll_call_id', 'bill_id', 'date'], # Check actual schema
+                    required_cols=['roll_call_id', 'bill_id', 'date'],
                     id_cols=['roll_call_id', 'bill_id'])
 
         # --- Validate optional DataFrames if they loaded ---
@@ -178,148 +199,206 @@ class DataPreprocessor:
                     id_cols=['sponsor_id', 'bill_id', 'legislator_id'])
 
         _check_df(self.committee_membership_df, "Committee Membership",
-                    required_cols=['committee_id', 'legislator_id', 'session_year'], # Check actual schema
+                    required_cols=['committee_id', 'legislator_id', 'session_year'],
                     id_cols=['committee_id', 'legislator_id'])
 
-        # --- Cross-DataFrame ID Consistency Checks ---
+        # --- Cross-DataFrame ID Consistency Checks (Make more robust) ---
         logger.info("Performing cross-DataFrame ID consistency checks...")
-        if self.votes_df is not None and self.legislators_df is not None:
+        # Check Votes vs Legislators
+        if self.votes_df is not None and not self.votes_df.empty and \
+           self.legislators_df is not None and not self.legislators_df.empty:
             try:
-                # Ensure IDs are compatible types before check
-                common_leg_dtype = pd.api.types.infer_dtype(self.votes_df['legislator_id'])
-                leg_ids_votes = self.votes_df['legislator_id'].astype(common_leg_dtype).unique()
-                leg_ids_master = self.legislators_df['legislator_id'].astype(common_leg_dtype).unique()
-                missing_legislators = np.setdiff1d(leg_ids_votes, leg_ids_master)
-                if len(missing_legislators) > 0:
-                    logger.warning(f"{len(missing_legislators)} legislator_ids in votes_df not found in legislators_df. Example: {missing_legislators[:5]}")
-                    # overall_valid = False # Decide if this is critical
-            except KeyError as e:
-                 logger.error(f"KeyError during legislator ID consistency check: {e}")
-                 overall_valid = False
-            except Exception as e:
-                 logger.error(f"Error during legislator ID consistency check: {e}", exc_info=True)
+                if 'legislator_id' not in self.votes_df.columns or \
+                   'legislator_id' not in self.legislators_df.columns:
+                    logger.warning("Skipping Votes<->Legislators ID check: missing 'legislator_id' column in one or both DataFrames.")
+                else:
+                    # Check inferred types before attempting conversion
+                    votes_leg_dtype_str = pd.api.types.infer_dtype(self.votes_df['legislator_id'])
+                    master_leg_dtype_str = pd.api.types.infer_dtype(self.legislators_df['legislator_id'])
 
-        if self.votes_df is not None and self.roll_calls_df is not None:
-            try:
-                common_rc_dtype = pd.api.types.infer_dtype(self.votes_df['roll_call_id'])
-                rc_ids_votes = self.votes_df['roll_call_id'].astype(common_rc_dtype).unique()
-                rc_ids_master = self.roll_calls_df['roll_call_id'].astype(common_rc_dtype).unique()
-                missing_roll_calls = np.setdiff1d(rc_ids_votes, rc_ids_master)
-                if len(missing_roll_calls) > 0:
-                    logger.warning(f"{len(missing_roll_calls)} roll_call_ids in votes_df not found in roll_calls_df. Example: {missing_roll_calls[:5]}")
-                    # overall_valid = False
+                    if votes_leg_dtype_str == 'empty' or master_leg_dtype_str == 'empty':
+                        logger.warning("Skipping Votes<->Legislators ID check: 'legislator_id' column is effectively empty in one or both DataFrames.")
+                    else:
+                        # Proceed with comparison if types are not empty
+                        common_leg_dtype = np.result_type(self.votes_df['legislator_id'].dtype, self.legislators_df['legislator_id'].dtype)
+                        leg_ids_votes = self.votes_df['legislator_id'].dropna().astype(common_leg_dtype).unique()
+                        leg_ids_master = self.legislators_df['legislator_id'].dropna().astype(common_leg_dtype).unique()
+                        missing_legislators = np.setdiff1d(leg_ids_votes, leg_ids_master)
+                        if len(missing_legislators) > 0:
+                            logger.warning(f"{len(missing_legislators)} legislator_ids in votes_df not found in legislators_df. Example: {missing_legislators[:5]}")
+                            # overall_valid = False # Decide if this is critical
             except KeyError as e:
-                 logger.error(f"KeyError during roll_call ID consistency check: {e}")
+                 logger.error(f"KeyError during Votes<->Legislators ID consistency check: {e}")
                  overall_valid = False
             except Exception as e:
-                 logger.error(f"Error during roll_call ID consistency check: {e}", exc_info=True)
+                 logger.error(f"Error during Votes<->Legislators ID consistency check: {e}", exc_info=True)
+                 # Don't necessarily invalidate overall, but log the error
+
+        # Check Votes vs Roll Calls
+        if self.votes_df is not None and not self.votes_df.empty and \
+           self.roll_calls_df is not None and not self.roll_calls_df.empty:
+            try:
+                if 'roll_call_id' not in self.votes_df.columns or \
+                   'roll_call_id' not in self.roll_calls_df.columns:
+                    logger.warning("Skipping Votes<->RollCalls ID check: missing 'roll_call_id' column.")
+                else:
+                    votes_rc_dtype_str = pd.api.types.infer_dtype(self.votes_df['roll_call_id'])
+                    master_rc_dtype_str = pd.api.types.infer_dtype(self.roll_calls_df['roll_call_id'])
+
+                    if votes_rc_dtype_str == 'empty' or master_rc_dtype_str == 'empty':
+                         logger.warning("Skipping Votes<->RollCalls ID check: 'roll_call_id' column is effectively empty.")
+                    else:
+                        common_rc_dtype = np.result_type(self.votes_df['roll_call_id'].dtype, self.roll_calls_df['roll_call_id'].dtype)
+                        rc_ids_votes = self.votes_df['roll_call_id'].dropna().astype(common_rc_dtype).unique()
+                        rc_ids_master = self.roll_calls_df['roll_call_id'].dropna().astype(common_rc_dtype).unique()
+                        missing_roll_calls = np.setdiff1d(rc_ids_votes, rc_ids_master)
+                        if len(missing_roll_calls) > 0:
+                            logger.warning(f"{len(missing_roll_calls)} roll_call_ids in votes_df not found in roll_calls_df. Example: {missing_roll_calls[:5]}")
+                            # overall_valid = False
+            except KeyError as e:
+                 logger.error(f"KeyError during Votes<->RollCalls ID consistency check: {e}")
+                 overall_valid = False
+            except Exception as e:
+                 logger.error(f"Error during Votes<->RollCalls ID consistency check: {e}", exc_info=True)
 
         if overall_valid:
             logger.info("Data validation completed successfully.")
         else:
             logger.error("Data validation finished with warnings or errors. Please review logs carefully before proceeding.")
+        # Return the overall validity status, which might be False due to missing required columns
+        # but the pipeline might continue if the subsequent steps can handle it.
         return overall_valid
 
     def clean_data(self) -> bool:
         """Clean and standardize data types and values."""
         logger.info("Starting data cleaning...")
         try:
-            # --- Ensure DataFrames Exist ---
-            if self.bills_df is None or self.votes_df is None or self.legislators_df is None or self.roll_calls_df is None:
-                logger.critical("One or more critical DataFrames (Bills, Votes, Legislators, RollCalls) are None after validation. Aborting cleaning.")
-                return False
-
-            # --- Bills Cleaning ---
-            logger.debug("Cleaning Bills DataFrame...")
-            self.bills_df['status_desc'] = self.bills_df['status'].map(STATUS_CODES).fillna('Unknown Status')
-            
-            # Handle dates with more robust parsing
-            date_cols_bills = ['date_introduced', 'date_last_action']
-            for col in date_cols_bills:
-                if col in self.bills_df.columns:
-                    self.bills_df[col] = pd.to_datetime(self.bills_df[col], errors='coerce')
-                    # Log number of invalid dates
-                    invalid_dates = self.bills_df[col].isna().sum()
-                    if invalid_dates > 0:
-                        logger.warning(f"Found {invalid_dates} invalid dates in {col}")
-            
-            # Ensure bill_id is correct type and handle invalid values
-            self.bills_df['bill_id'] = pd.to_numeric(self.bills_df['bill_id'], errors='coerce').astype('Int64')
-            invalid_bill_ids = self.bills_df['bill_id'].isna().sum()
-            if invalid_bill_ids > 0:
-                logger.warning(f"Found {invalid_bill_ids} invalid bill IDs")
-
-            # Clean and standardize bill subjects
-            if 'subjects' in self.bills_df.columns:
-                self.bills_df['subjects'] = self.bills_df['subjects'].fillna('')
-                self.bills_df['subjects'] = self.bills_df['subjects'].str.strip().str.lower()
-                self.bills_df['num_subjects'] = self.bills_df['subjects'].str.split(';').str.len()
-
-            # --- Roll Calls Cleaning ---
-            logger.debug("Cleaning Roll Calls DataFrame...")
-            if 'date' in self.roll_calls_df.columns:
-                self.roll_calls_df['vote_date'] = pd.to_datetime(self.roll_calls_df['date'], errors='coerce')
-                invalid_dates = self.roll_calls_df['vote_date'].isna().sum()
-                if invalid_dates > 0:
-                    logger.warning(f"Found {invalid_dates} invalid vote dates")
+            # --- Ensure Critical DataFrames Exist ---
+            if self.bills_df is None:
+                 logger.warning("Bills DataFrame is None. Skipping Bills cleaning.")
             else:
-                logger.warning("Roll Calls DataFrame missing 'date' column. Cannot create 'vote_date'.")
-
-            # Ensure roll_call_id and bill_id types are consistent for merging
-            self.roll_calls_df['roll_call_id'] = pd.to_numeric(self.roll_calls_df['roll_call_id'], errors='coerce').astype('Int64')
-            self.roll_calls_df['bill_id'] = pd.to_numeric(self.roll_calls_df['bill_id'], errors='coerce').astype('Int64')
-            
-            # Clean vote counts
-            vote_count_cols = ['yea', 'nay', 'absent', 'excused']
-            for col in vote_count_cols:
-                if col in self.roll_calls_df.columns:
-                    self.roll_calls_df[col] = pd.to_numeric(self.roll_calls_df[col], errors='coerce').fillna(0).astype('Int64')
-
-            # --- Votes Cleaning ---
-            logger.debug("Cleaning Votes DataFrame...")
-            # Map vote text to standardized values
-            self.votes_df['vote_value'] = self.votes_df['vote_text'].map(VOTE_TEXT_MAP).fillna(-2)  # -2 for unknown/absent
-            
-            # Ensure legislator_id and roll_call_id are correct types
-            self.votes_df['legislator_id'] = pd.to_numeric(self.votes_df['legislator_id'], errors='coerce').astype('Int64')
-            self.votes_df['roll_call_id'] = pd.to_numeric(self.votes_df['roll_call_id'], errors='coerce').astype('Int64')
-            
-            # Log invalid IDs
-            invalid_leg_ids = self.votes_df['legislator_id'].isna().sum()
-            invalid_rc_ids = self.votes_df['roll_call_id'].isna().sum()
-            if invalid_leg_ids > 0:
-                logger.warning(f"Found {invalid_leg_ids} invalid legislator IDs in votes")
-            if invalid_rc_ids > 0:
-                logger.warning(f"Found {invalid_rc_ids} invalid roll call IDs in votes")
-
-            # --- Legislators Cleaning ---
-            logger.debug("Cleaning Legislators DataFrame...")
-            # Ensure legislator_id is correct type
-            self.legislators_df['legislator_id'] = pd.to_numeric(self.legislators_df['legislator_id'], errors='coerce').astype('Int64')
-            
-            # Clean and standardize party information
-            if 'party_id' in self.legislators_df.columns:
-                self.legislators_df['party_id'] = pd.to_numeric(self.legislators_df['party_id'], errors='coerce').astype('Int64')
-                invalid_party_ids = self.legislators_df['party_id'].isna().sum()
-                if invalid_party_ids > 0:
-                    logger.warning(f"Found {invalid_party_ids} invalid party IDs")
-
-            # Clean and standardize names
-            if 'name' in self.legislators_df.columns:
-                self.legislators_df['name'] = self.legislators_df['name'].str.strip()
-                self.legislators_df['name'] = self.legislators_df['name'].str.title()
-
-            # --- Committee Membership Cleaning ---
-            if self.committee_membership_df is not None:
-                logger.debug("Cleaning Committee Membership DataFrame...")
-                # Ensure IDs are correct types
-                self.committee_membership_df['committee_id'] = pd.to_numeric(self.committee_membership_df['committee_id'], errors='coerce').astype('Int64')
-                self.committee_membership_df['legislator_id'] = pd.to_numeric(self.committee_membership_df['legislator_id'], errors='coerce').astype('Int64')
+                # --- Bills Cleaning ---
+                logger.debug("Cleaning Bills DataFrame...")
+                if 'status' in self.bills_df.columns:
+                     self.bills_df['status_desc'] = self.bills_df['status'].map(STATUS_CODES).fillna('Unknown Status')
+                else:
+                    logger.warning("'status' column missing in Bills DF, cannot create 'status_desc'.")
                 
-                # Clean and standardize roles
+                # Handle dates with more robust parsing
+                date_cols_bills = ['date_introduced', 'date_last_action']
+                for col in date_cols_bills:
+                    if col in self.bills_df.columns:
+                        self.bills_df[col] = pd.to_datetime(self.bills_df[col], errors='coerce')
+                        # Log number of invalid dates
+                        invalid_dates = self.bills_df[col].isna().sum()
+                        if invalid_dates > 0:
+                            logger.warning(f"Found {invalid_dates} invalid dates in {col}")
+                    else:
+                         logger.warning(f"Date column '{col}' missing in Bills DF.")
+                
+                # Ensure bill_id is correct type and handle invalid values
+                if 'bill_id' in self.bills_df.columns:
+                    self.bills_df['bill_id'] = pd.to_numeric(self.bills_df['bill_id'], errors='coerce').astype('Int64')
+                    invalid_bill_ids = self.bills_df['bill_id'].isna().sum()
+                    if invalid_bill_ids > 0:
+                        logger.warning(f"Found {invalid_bill_ids} invalid bill IDs")
+                else:
+                     logger.warning("'bill_id' column missing in Bills DF.")
+
+                # Clean and standardize bill subjects
+                if 'subjects' in self.bills_df.columns:
+                    self.bills_df['subjects'] = self.bills_df['subjects'].fillna('')
+                    self.bills_df['subjects'] = self.bills_df['subjects'].str.strip().str.lower()
+                    self.bills_df['num_subjects'] = self.bills_df['subjects'].str.split(';').str.len()
+                else:
+                     logger.warning("'subjects' column missing in Bills DF.")
+
+            # --- Roll Calls Cleaning (Check if exists) ---
+            if self.roll_calls_df is None:
+                 logger.warning("Roll Calls DataFrame is None. Skipping Roll Calls cleaning.")
+            else:
+                logger.debug("Cleaning Roll Calls DataFrame...")
+                if 'date' in self.roll_calls_df.columns:
+                    self.roll_calls_df['vote_date'] = pd.to_datetime(self.roll_calls_df['date'], errors='coerce')
+                    invalid_dates = self.roll_calls_df['vote_date'].isna().sum()
+                    if invalid_dates > 0:
+                        logger.warning(f"Found {invalid_dates} invalid vote dates")
+                else:
+                    logger.warning("Roll Calls DataFrame missing 'date' column. Cannot create 'vote_date'.")
+
+                # Ensure roll_call_id and bill_id types are consistent for merging
+                if 'roll_call_id' in self.roll_calls_df.columns:
+                    self.roll_calls_df['roll_call_id'] = pd.to_numeric(self.roll_calls_df['roll_call_id'], errors='coerce').astype('Int64')
+                if 'bill_id' in self.roll_calls_df.columns:
+                    self.roll_calls_df['bill_id'] = pd.to_numeric(self.roll_calls_df['bill_id'], errors='coerce').astype('Int64')
+                
+                # Clean vote counts
+                vote_count_cols = ['yea', 'nay', 'absent', 'excused']
+                for col in vote_count_cols:
+                    if col in self.roll_calls_df.columns:
+                        self.roll_calls_df[col] = pd.to_numeric(self.roll_calls_df[col], errors='coerce').fillna(0).astype('Int64')
+
+            # --- Votes Cleaning (Check if exists) ---
+            if self.votes_df is None:
+                 logger.warning("Votes DataFrame is None. Skipping Votes cleaning.")
+            else:
+                logger.debug("Cleaning Votes DataFrame...")
+                # Map vote text to standardized values
+                if 'vote_text' in self.votes_df.columns:
+                    self.votes_df['vote_value'] = self.votes_df['vote_text'].map(VOTE_TEXT_MAP).fillna(-2)  # -2 for unknown/absent
+                else:
+                     logger.warning("'vote_text' column missing in Votes DF. Cannot create 'vote_value'.")
+                
+                # Ensure legislator_id and roll_call_id are correct types
+                if 'legislator_id' in self.votes_df.columns:
+                     self.votes_df['legislator_id'] = pd.to_numeric(self.votes_df['legislator_id'], errors='coerce').astype('Int64')
+                     invalid_leg_ids = self.votes_df['legislator_id'].isna().sum()
+                     if invalid_leg_ids > 0:
+                         logger.warning(f"Found {invalid_leg_ids} invalid legislator IDs in votes")
+                if 'roll_call_id' in self.votes_df.columns:
+                     self.votes_df['roll_call_id'] = pd.to_numeric(self.votes_df['roll_call_id'], errors='coerce').astype('Int64')
+                     invalid_rc_ids = self.votes_df['roll_call_id'].isna().sum()
+                     if invalid_rc_ids > 0:
+                         logger.warning(f"Found {invalid_rc_ids} invalid roll call IDs in votes")
+
+            # --- Legislators Cleaning (Check if exists) ---
+            if self.legislators_df is None:
+                 logger.warning("Legislators DataFrame is None. Skipping Legislators cleaning.")
+            else:
+                logger.debug("Cleaning Legislators DataFrame...")
+                # Ensure legislator_id is correct type
+                if 'legislator_id' in self.legislators_df.columns:
+                     self.legislators_df['legislator_id'] = pd.to_numeric(self.legislators_df['legislator_id'], errors='coerce').astype('Int64')
+                
+                # Clean and standardize party information
+                if 'party_id' in self.legislators_df.columns:
+                    self.legislators_df['party_id'] = pd.to_numeric(self.legislators_df['party_id'], errors='coerce').astype('Int64')
+                    invalid_party_ids = self.legislators_df['party_id'].isna().sum()
+                    if invalid_party_ids > 0:
+                        logger.warning(f"Found {invalid_party_ids} invalid party IDs")
+
+                # Clean and standardize names
+                if 'name' in self.legislators_df.columns:
+                    self.legislators_df['name'] = self.legislators_df['name'].str.strip()
+                    self.legislators_df['name'] = self.legislators_df['name'].str.title()
+
+            # --- Committee Membership Cleaning (Check if exists) ---
+            if self.committee_membership_df is None:
+                logger.warning("Committee Membership DataFrame is None. Skipping Committee Membership cleaning.")
+            elif not self.committee_membership_df.empty:
+                logger.debug("Cleaning Committee Membership DataFrame...")
+                # Ensure IDs are correct types (Check if columns exist)
+                if 'committee_id' in self.committee_membership_df.columns:
+                    self.committee_membership_df['committee_id'] = pd.to_numeric(self.committee_membership_df['committee_id'], errors='coerce').astype('Int64')
+                if 'legislator_id' in self.committee_membership_df.columns:
+                    self.committee_membership_df['legislator_id'] = pd.to_numeric(self.committee_membership_df['legislator_id'], errors='coerce').astype('Int64')
+                
+                # Clean and standardize roles (Check if column exists)
                 if 'role' in self.committee_membership_df.columns:
                     self.committee_membership_df['role'] = self.committee_membership_df['role'].str.strip().str.title()
                     self.committee_membership_df['is_leader'] = self.committee_membership_df['role'].str.contains('Chair|Leader', case=False)
+            else:
+                 logger.debug("Committee Membership DataFrame is empty. Skipping cleaning.")
 
             logger.info("Data cleaning completed successfully.")
             return True
@@ -338,6 +417,16 @@ class DataPreprocessor:
                 # Clean and prepare subject text
                 subject_texts = self.bills_df['subjects'].fillna('').str.replace(';', ' ')
                 
+                # Log check for empty subject strings before vectorization
+                empty_subject_mask = (subject_texts.str.strip() == '')
+                num_empty_subjects = empty_subject_mask.sum()
+                if num_empty_subjects > 0:
+                    logger.warning(f"Found {num_empty_subjects} bills with effectively empty subject strings before TF-IDF vectorization.")
+                    # Example logging of affected bill IDs (optional, can be verbose)
+                    # if logger.isEnabledFor(logging.DEBUG):
+                    #     empty_subject_bill_ids = self.bills_df.loc[empty_subject_mask, 'bill_id'].tolist()
+                    #     logger.debug(f"Bill IDs with empty subjects (sample): {empty_subject_bill_ids[:10]}")
+
                 # Create and fit TF-IDF vectorizer
                 vectorizer = TfidfVectorizer(
                     lowercase=True,
@@ -346,16 +435,34 @@ class DataPreprocessor:
                     ngram_range=(1, 2)  # Include bigrams
                 )
                 
-                # Transform subjects to TF-IDF vectors
-                subject_vectors = vectorizer.fit_transform(subject_texts)
-                
-                # Convert to DataFrame and add to bills_df
-                subject_df = pd.DataFrame(
-                    subject_vectors.toarray(),
-                    columns=[f'subject_{i}' for i in range(subject_vectors.shape[1])]
-                )
-                self.bills_df = pd.concat([self.bills_df, subject_df], axis=1)
-                logger.info(f"Created {subject_vectors.shape[1]} subject vector features")
+                try:
+                    # Transform subjects to TF-IDF vectors
+                    subject_vectors = vectorizer.fit_transform(subject_texts)
+                    
+                    # Convert to DataFrame and add to bills_df
+                    subject_df = pd.DataFrame(
+                        subject_vectors.toarray(),
+                        columns=[f'subject_{i}' for i in range(subject_vectors.shape[1])]
+                    )
+                    self.bills_df = pd.concat([self.bills_df, subject_df], axis=1)
+                    logger.info(f"Created {subject_vectors.shape[1]} subject vector features")
+                except ValueError as e:
+                    if "empty vocabulary" in str(e):
+                         logger.warning("TF-IDF vectorizer failed due to empty vocabulary (likely empty input). Skipping subject vector creation.")
+                         # Create empty columns to maintain schema if needed, or just skip
+                         # subject_cols = [f'subject_{i}' for i in range(1000)] # Assume max_features
+                         # for col in subject_cols:
+                         #     if col not in self.bills_df.columns: self.bills_df[col] = 0
+                    else:
+                         logger.error(f"ValueError during TF-IDF vectorization: {e}", exc_info=True)
+                         # Propagate other ValueErrors
+                         raise e
+                except Exception as e:
+                     logger.error(f"Unexpected error during TF-IDF vectorization: {e}", exc_info=True)
+                     # Propagate other exceptions
+                     raise e
+            else:
+                logger.warning("'subjects' column not found in Bills DataFrame. Skipping subject vector creation.")
 
             # --- Influence Score Feature ---
             logger.debug("Calculating influence scores...")
@@ -391,34 +498,58 @@ class DataPreprocessor:
                     logger.warning("Sponsors DataFrame not available. Setting bill success score to 0.")
                 
                 # Calculate committee leadership score (0-100)
+                # Initialize committee score first
+                self.legislators_df['committee_score'] = 0
+                
                 if self.committee_membership_df is not None:
-                    committee_roles = self.committee_membership_df.groupby('legislator_id')['role'].agg(list)
-                    
-                    def calculate_committee_score(legislator_id):
-                        if legislator_id not in committee_roles.index:
-                            return 0
-                        roles = committee_roles[legislator_id]
-                        if any('Chair' in role for role in roles):
-                            return 100
-                        elif any('Vice Chair' in role for role in roles):
-                            return 50
-                        elif len(roles) > 0:
-                            return 25
-                        return 0
-                    
-                    self.legislators_df['committee_score'] = self.legislators_df['legislator_id'].apply(calculate_committee_score)
+                    # Check if 'role' column exists before using it
+                    if 'role' in self.committee_membership_df.columns and not self.committee_membership_df.empty:
+                        try:
+                            committee_roles = self.committee_membership_df.groupby('legislator_id')['role'].agg(list)
+                            
+                            def calculate_committee_score(legislator_id):
+                                if legislator_id not in committee_roles.index:
+                                    return 0
+                                roles = committee_roles[legislator_id]
+                                if any('Chair' in role for role in roles if role is not None):
+                                    return 100
+                                elif any('Vice Chair' in role for role in roles if role is not None):
+                                    return 50
+                                elif len(roles) > 0:
+                                    return 25
+                                return 0
+                            
+                            self.legislators_df['committee_score'] = self.legislators_df['legislator_id'].apply(calculate_committee_score)
+                            logger.info("Calculated committee scores.")
+                        except Exception as e:
+                             logger.error(f"Error calculating committee score: {e}", exc_info=True)
+                             # Keep default committee_score of 0
+                    else:
+                         logger.warning("Committee membership DataFrame is missing 'role' column or is empty. Setting committee score to 0.")
                 else:
-                    self.legislators_df['committee_score'] = 0
                     logger.warning("Committee membership DataFrame not available. Setting committee score to 0.")
                 
                 # Calculate final influence score (weighted average)
-                self.legislators_df['influence_score'] = (
-                    0.3 * self.legislators_df['leadership_score'] +
-                    0.4 * self.legislators_df['bill_success_score'] +
-                    0.3 * self.legislators_df['committee_score']
-                )
-                
-                logger.info("Influence scores calculated successfully")
+                # Ensure all component columns exist before calculation
+                required_influence_cols = ['leadership_score', 'bill_success_score', 'committee_score']
+                if all(col in self.legislators_df.columns for col in required_influence_cols):
+                    self.legislators_df['influence_score'] = (
+                        0.3 * self.legislators_df['leadership_score'] +
+                        0.4 * self.legislators_df['bill_success_score'] +
+                        0.3 * self.legislators_df['committee_score']
+                    ).fillna(0) # Fill potential NaNs resulting from calculation
+                    logger.info("Influence scores calculated successfully")
+                else:
+                    missing_cols = [col for col in required_influence_cols if col not in self.legislators_df.columns]
+                    logger.error(f"Cannot calculate final influence score: Missing component columns {missing_cols}. Setting influence_score to 0.")
+                    self.legislators_df['influence_score'] = 0.0
+            else:
+                 logger.warning("Skipping influence score calculation: one or more required DataFrames (Legislators, Bills, Committee Memberships) are missing.")
+                 if self.legislators_df is not None:
+                      # Ensure influence score columns exist even if calculation skipped
+                      for col in ['leadership_score', 'bill_success_score', 'committee_score', 'influence_score']:
+                           if col not in self.legislators_df.columns:
+                                self.legislators_df[col] = 0.0
 
             # --- Existing Feature Engineering ---
             # --- Bill Features ---
@@ -830,39 +961,55 @@ class DataPreprocessor:
     def process_all(self) -> bool:
         """Run the complete preprocessing pipeline."""
         logger.info("Starting complete preprocessing pipeline...")
+        final_success = True # Track overall success
         
         # Load data
         if not self.load_all_data():
             logger.error("Failed to load data")
-            return False
+            # Do not return False immediately, allow processing to continue if possible
+            final_success = False
         
         # Validate data structure
         if not self.validate_data():
             logger.error("Data validation failed")
-            return False
+            # Do not return False, just log the error and continue
+            final_success = False
         
-        # Clean data
-        if not self.clean_data():
+        # Clean data (Check if critical DFs are present before attempting)
+        if self.bills_df is None or self.votes_df is None or self.legislators_df is None:
+             logger.critical("Cannot proceed with cleaning: One or more critical DataFrames (Bills, Votes, Legislators) are None.")
+             final_success = False
+        elif not self.clean_data():
             logger.error("Data cleaning failed")
-            return False
+            final_success = False
         
-        # Engineer features
-        if not self.engineer_features():
+        # Engineer features (Check if critical DFs are present)
+        if self.bills_df is None:
+            logger.critical("Cannot proceed with feature engineering: Bills DataFrame is None.")
+            final_success = False
+        elif not self.engineer_features():
             logger.error("Feature engineering failed")
-            return False
+            final_success = False
         
-        # Validate features
-        if not self.validate_features():
+        # Validate features (Check if critical DFs are present)
+        if self.bills_df is None or self.legislators_df is None:
+             logger.critical("Cannot proceed with feature validation: Bills or Legislators DataFrame is None.")
+             final_success = False
+        elif not self.validate_features():
             logger.error("Feature validation failed")
-            return False
+            final_success = False
         
-        # Save processed data
+        # Save processed data (Attempt even if steps failed, might save partial results)
         if not self.save_processed_data():
             logger.error("Failed to save processed data")
-            return False
+            final_success = False
         
-        logger.info("Preprocessing pipeline completed successfully")
-        return True
+        if final_success:
+            logger.info("Preprocessing pipeline completed successfully")
+        else:
+            logger.error("Preprocessing pipeline completed with one or more errors.")
+            
+        return final_success
 
     def create_feature_matrix(self, filename: str = 'voting_feature_matrix.csv') -> bool:
         """Merges processed dataframes to create the final feature matrix for modeling.

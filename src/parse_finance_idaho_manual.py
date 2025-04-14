@@ -1,437 +1,554 @@
 #!/usr/bin/env python3
 """
-Parse manually acquired Idaho campaign finance CSV files.
-
-This script reads the specific CSV files downloaded from the Idaho SOS website
-(or obtained via public records request) and transforms them into the
-standardized format expected by the Valley Vote project.
+Parses and cleans manually collected Idaho campaign finance data,
+categorizing different file types into separate processed outputs.
 """
 
-# Standard library imports
 import argparse
+import csv
+import json
 import logging
-from pathlib import Path
-import sys
-from typing import Dict, List, Optional, Union
+import os
 import re
+import warnings
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
-# Third-party imports
+import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
-# Local imports
-# Need to adjust path if running standalone vs as module
-try:
-    from .config import FINANCE_SCRAPE_LOG_FILE # Assuming shared log file name
-    from .utils import setup_logging, setup_project_paths, convert_to_csv
-    from .data_collection import FINANCE_COLUMN_MAPS # Use existing maps
-except ImportError:
-    # Handle running as script from project root
-    sys.path.append(str(Path(__file__).parent.parent))
-    from src.config import FINANCE_SCRAPE_LOG_FILE
-    from src.utils import setup_logging, setup_project_paths, convert_to_csv
-    from src.data_collection import FINANCE_COLUMN_MAPS
+from src.config import LOG_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR
+from src.utils import setup_logging
 
-# --- Configure Logging ---
-# Use a distinct logger name for this manual parser
-MANUAL_FINANCE_LOG_FILE = "manual_finance_parser.log"
-logger = logging.getLogger(Path(MANUAL_FINANCE_LOG_FILE).stem)
+# --- Logging Setup ---
+logger = setup_logging('parse_finance_idaho_manual.log', LOG_DIR)
+logging.captureWarnings(True) # Route warnings through logging system
 
 # --- Constants ---
-# Define expected column mappings based on observed CSVs and PDF keys (if available)
-# These might need refinement after inspecting file headers
-# Using lowercase keys for easier matching after reading headers
-MANUAL_CONTRIBUTION_MAP = {
-    # Potential columns from 'contribution and loan 20XX.csv' / 'ContributionDownload.csv'
-    'transactionid': 'transaction_id',
-    'committeename': 'committee_name', # Map committee name if present
-    'reportname': 'report_name',
-    'contributiontype': 'contribution_type', # Keep type if useful
-    'contributiondate': 'contribution_date',
-    'amount': 'contribution_amount',
-    'formtype': 'form_type', # e.g., Schedule A
-    'contributorname': 'contributor_name',
-    'address': 'contributor_address', # Assuming single address column
-    'city': 'contributor_city',
-    'state': 'contributor_state',
-    'zipcode': 'contributor_zip',
-    'occupation': 'occupation',
-    'employer': 'employer',
-    'description': 'contribution_description', # May contain purpose/notes
-    # Add other potential fields like 'Cash/Non-Cash', 'Candidate/Measure Name', etc.
-}
+MANUAL_FINANCE_RAW_DIR = RAW_DATA_DIR / 'campaign_finance' / 'idaho'
+MANUAL_FINANCE_PROCESSED_DIR = PROCESSED_DATA_DIR / 'finance' / 'idaho_manual'
 
-MANUAL_EXPENDITURE_MAP = {
-    # Potential columns from 'expenditures 20XX.csv' / 'ExpenditureDownload.csv'
-    'transactionid': 'transaction_id',
-    'committeename': 'committee_name', # Map committee name if present
-    'reportname': 'report_name',
-    'expendituretype': 'expenditure_type', # Keep type
-    'expendituredate': 'expenditure_date',
-    'amount': 'expenditure_amount',
-    'formtype': 'form_type', # e.g., Schedule B
-    'payeename': 'payee_name',
-    'address': 'payee_address', # Assuming single address column
-    'city': 'payee_city',
-    'state': 'payee_state',
-    'zipcode': 'payee_zip',
-    'purpose': 'expenditure_purpose',
-    'paymentcode': 'payment_code', # Cash/Non-Cash?
-    # Add others like 'Candidate/Measure Name'
-}
+# --- Helper Functions ---
 
-MANUAL_LOAN_MAP = {
-     # Potential columns from 'Loan&DebtDownload.csv' or combined files
-     'transactionid': 'transaction_id', # May need prefixing (e.g., LOAN_) if combined
-     'committeename': 'committee_name',
-     'reportname': 'report_name',
-     'loandate': 'loan_date', # Assuming specific date field
-     'date': 'loan_date', # Fallback
-     'lendername': 'lender_name',
-     'address': 'lender_address',
-     'city': 'lender_city',
-     'state': 'lender_state',
-     'zipcode': 'lender_zip',
-     'amount': 'loan_amount',
-     'interestrate': 'loan_interest_rate',
-     'duedate': 'loan_due_date',
-     'description': 'loan_description',
-     # Add other fields like guarantor, payments, outstanding balance if present
-}
-
-MANUAL_COMMITTEE_MAP = {
-    # Potential columns from 'CommitteeDownload.csv'
-    'committeeid': 'committee_id_raw', # Keep original ID if needed
-    'committeename': 'committee_name',
-    'committeetype': 'committee_type',
-    'electioncycle': 'election_cycle',
-    'address': 'committee_address',
-    'city': 'committee_city',
-    'state': 'committee_state',
-    'zipcode': 'committee_zip',
-    'treasurername': 'treasurer_name',
-    'active': 'is_active', # Map status field
-    'registrationdate': 'registration_date',
-    # Add others like contact info, associated candidates/measures
-}
-
-MANUAL_CANDIDATE_MAP = {
-    # Potential columns from 'candidates_2020-2025.csv'
-    'candidateid': 'candidate_id_raw', # Keep original ID
-    'firstname': 'first_name',
-    'middlename': 'middle_name',
-    'lastname': 'last_name',
-    'fullname': 'candidate_name', # Assuming a full name column exists
-    'party': 'party',
-    'electioncycle': 'election_cycle',
-    'office': 'office_sought',
-    'district': 'district',
-    'status': 'candidate_status',
-    # Add others like filing date, committee links
-}
-
-# --- Parsing Functions ---
-
-def _read_and_clean_csv(file_path: Path, expected_cols: list[str] | None = None) -> pd.DataFrame | None:
-    """Reads a CSV file, cleans headers, and checks for expected columns."""
-    if not file_path.exists():
-        logger.warning(f"File not found: {file_path}")
+def clean_amount(amount_str: Optional[str]) -> Optional[float]:
+    """Cleans a string representation of a monetary amount."""
+    if pd.isna(amount_str):
         return None
-    if file_path.stat().st_size == 0:
-        logger.info(f"File is empty: {file_path.name}")
-        return None
+    if isinstance(amount_str, (int, float)):
+        return float(amount_str) # Already numeric
+
+    # Remove currency symbols, commas, and extra spaces
+    cleaned = re.sub(r'[$,\s]', '', str(amount_str))
+
+    # Handle potential parentheses for negative numbers if needed (not seen yet)
+    # if cleaned.startswith('(') and cleaned.endswith(')'):
+    #     cleaned = '-' + cleaned[1:-1]
 
     try:
-        # Try reading with UTF-8 first
+        return float(cleaned)
+    except (ValueError, TypeError):
+        logger.warning(f"Could not parse amount: {amount_str}")
+        return None
+
+def _read_csv_with_fallback(file_path: Path, header: int = 0) -> Optional[pd.DataFrame]:
+    """Reads a CSV using UTF-8, falling back to latin-1. Handles bad lines."""
+    try:
+        # Use 'warn' to log bad lines but continue parsing
+        return pd.read_csv(file_path, low_memory=False, encoding='utf-8', on_bad_lines='warn', header=header)
+    except UnicodeDecodeError:
+        logger.warning(f"UTF-8 decoding failed for {file_path.name}, trying latin-1.")
         try:
-            df = pd.read_csv(file_path, low_memory=False, encoding='utf-8', on_bad_lines='warn')
-        except UnicodeDecodeError:
-            logger.warning(f"UTF-8 decoding failed for {file_path.name}, trying latin-1.")
-            df = pd.read_csv(file_path, low_memory=False, encoding='latin-1', on_bad_lines='warn')
-        except pd.errors.ParserError as e:
-             # Log specific parsing errors if they occur even with on_bad_lines='warn'
-             # (though 'warn' should prevent this from being fatal)
-             logger.error(f"Pandas parsing error in {file_path.name}: {e}")
-             return None
+            return pd.read_csv(file_path, low_memory=False, encoding='latin-1', on_bad_lines='warn', header=header)
+        except Exception as e_inner:
+            logger.error(f"Pandas error reading {file_path.name} with latin-1: {str(e_inner)}", exc_info=True)
+            return None
+    except Exception as e_outer:
+        # Catch other potential pd.read_csv errors
+        logger.error(f"Pandas error reading {file_path.name}: {str(e_outer)}", exc_info=True)
+        return None
+
+def parse_transaction_csv(file_path: Union[str, Path]) -> Optional[pd.DataFrame]:
+    """Loads and performs specific cleaning for transaction-based CSVs."""
+    file_path = Path(file_path)
+    logger.info(f"Parsing TRANSACTION file: {file_path.name}")
+    try:
+        df = _read_csv_with_fallback(file_path)
+        if df is None:
+            return None # Error already logged
+
+        # Handle potential extra header row
+        if df.shape[1] == 1 and pd.isna(df.iloc[0, 0]):
+             logger.debug(f"Skipping potential extra header row in {file_path.name}")
+             df = _read_csv_with_fallback(file_path, header=1)
+             if df is None: return None
+
+        logger.info(f"Loaded {len(df):,} records from {file_path.name}")
+        df.columns = df.columns.str.strip() # Clean column names first
+
+        # Clean Amounts - Specific to transaction files
+        # Use standardized names if possible, or common patterns
+        amount_cols_patterns = ['Amount', 'Interest Amount', 'Loan Amount'] # Simplified patterns
+        actual_amount_cols = [c for c in df.columns if any(p in c for p in amount_cols_patterns)]
+
+        if not actual_amount_cols:
+             logger.warning(f"No standard amount columns found pattern match in {file_path.name}")
+        for col in actual_amount_cols:
+            clean_col_name = f'{col}_clean'
+            logger.debug(f"Cleaning amount column: {col} -> {clean_col_name}")
+            df[clean_col_name] = df[col].apply(clean_amount)
+            
+            # Check for rows that failed parsing
+            failed_parse_mask = df[clean_col_name].isna() & df[col].notna()
+            failed_indices = df.index[failed_parse_mask].tolist()
+            if failed_indices:
+                logger.warning(f"Found {len(failed_indices)} amounts that failed parsing in column '{col}' of file {file_path.name}. Example indices: {failed_indices[:5]}")
+                # Optionally log the actual failing values for first few indices:
+                # for idx in failed_indices[:3]: 
+                #     logger.debug(f"    Index {idx}: Original value '{df.loc[idx, col]}' failed amount parsing.")
+
+        # Parse Dates - Specific to transaction files
+        date_cols_patterns = ['Date'] # Simplified pattern
+        actual_date_cols = [c for c in df.columns if any(p in c for p in date_cols_patterns)]
+
+        if not actual_date_cols:
+             logger.warning(f"No standard date columns found matching pattern in {file_path.name}")
+        for col in actual_date_cols:
+            logger.debug(f"Parsing date column: {col}")
+            df[f'{col}_dt'] = pd.to_datetime(df[col], errors='coerce')
+            invalid_dates = df[f'{col}_dt'].isna().sum()
+            if invalid_dates > 0:
+                # Log only if a significant portion is invalid, or reduce log level
+                if invalid_dates == len(df):
+                     logger.warning(f"All dates in column '{col}' are invalid in {file_path.name}")
+                else:
+                     logger.info(f"Found {invalid_dates} invalid dates in column '{col}' in {file_path.name}")
 
 
-        if df.empty:
-            logger.info(f"File read successfully but is empty (only headers?): {file_path.name}")
-            return df # Return empty DataFrame
-
-        # Clean column names: lowercase, strip whitespace, replace non-alphanumeric with _
-        df.columns = [
-            re.sub(r'[\\s\\W]+', '_', col.strip().lower())
-            for col in df.columns
-        ]
-
-        # Check for expected columns if provided
-        if expected_cols:
-            missing_cols = [col for col in expected_cols if col not in df.columns]
-            if missing_cols:
-                logger.warning(f"Missing expected columns in {file_path.name}: {missing_cols}")
-                logger.warning(f"Available columns: {list(df.columns)}")
-
-            extra_cols = [col for col in df.columns if col not in expected_cols]
-            if extra_cols:
-                 logger.debug(f"Extra columns found in {file_path.name} (will be kept): {extra_cols}")
-
-
+        # Add source file information
+        df['source_file'] = file_path.name
+        logger.info(f"Finished initial parsing for transaction file: {file_path.name}")
         return df
+
+    except pd.errors.EmptyDataError:
+        logger.warning(f"File is empty: {file_path.name}")
+        return None
+    except Exception as e: # Catch errors during cleaning/parsing
+        logger.error(f"Error processing {file_path.name} after reading: {str(e)}", exc_info=True)
+        return None
+
+def parse_generic_csv(file_path: Union[str, Path], file_type: str) -> Optional[pd.DataFrame]:
+    """Loads a generic CSV file (e.g., entities, reports) with basic handling."""
+    file_path = Path(file_path)
+    logger.info(f"Parsing {file_type.upper()} file: {file_path.name}")
+    try:
+        df = _read_csv_with_fallback(file_path)
+        if df is None:
+            return None
+
+        # Handle potential extra header row common in downloaded files
+        # Heuristic: Check if the first row looks like a title (few non-NaNs vs second row)
+        if len(df) > 1 and df.iloc[0].count() < df.iloc[1].count() * 0.5 :
+            logger.debug(f"Skipping potential extra header row in {file_path.name}")
+            df = _read_csv_with_fallback(file_path, header=1) # Re-read skipping first row
+            if df is None: return None
+
+        logger.info(f"Loaded {len(df):,} records from {file_path.name}")
+        # Add source file information
+        df['source_file'] = file_path.name
+        # Basic cleaning: strip whitespace from column names
+        df.columns = df.columns.str.strip()
+        logger.info(f"Finished parsing {file_type} file: {file_path.name}")
+        return df
+
+    except pd.errors.EmptyDataError:
+        logger.warning(f"File is empty: {file_path.name}")
+        return None
     except Exception as e:
-        logger.error(f"Error reading or cleaning CSV file {file_path}: {e}")
-        # Optionally re-raise or handle specific exceptions differently
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"Error parsing {file_type} file {file_path.name}: {str(e)}", exc_info=True)
         return None
 
-
-def parse_finance_file(file_path: Path, column_map: Dict[str, str], data_type_label: str) -> Optional[pd.DataFrame]:
-    """Parses a single finance file (contributions, expenditures, loans)."""
-    logger.info(f"Parsing {data_type_label} file: {file_path.name}")
-    df = _read_and_clean_csv(file_path)
-    if df is None:
-        return None
-
-    rename_dict = {csv_col: std_col for csv_col, std_col in column_map.items() if csv_col in df.columns}
-    df = df.rename(columns=rename_dict)
-
-    # Select only the columns that were successfully mapped
-    standard_columns = list(rename_dict.values())
-    df = df[standard_columns] # Keep only mapped columns for now
-
-    # --- Data Type Conversion & Cleaning (Example) ---
-    # Amounts
-    amount_col_std = None
-    if 'contribution_amount' in df.columns: amount_col_std = 'contribution_amount'
-    elif 'expenditure_amount' in df.columns: amount_col_std = 'expenditure_amount'
-    elif 'loan_amount' in df.columns: amount_col_std = 'loan_amount'
-
-    if amount_col_std:
-        # Ensure string type before cleaning
-        df[amount_col_std] = df[amount_col_std].astype(str)
-        # Remove $, ,, handle () for negatives
-        df[amount_col_std] = df[amount_col_std].str.replace(r'[$,]', '', regex=True)
-        neg_mask = df[amount_col_std].str.startswith('(') & df[amount_col_std].str.endswith(')')
-        df.loc[neg_mask, amount_col_std] = '-' + df.loc[neg_mask, amount_col_std].str.slice(1, -1)
-        df[amount_col_std] = pd.to_numeric(df[amount_col_std], errors='coerce')
-
-    # Dates
-    date_col_std = None
-    if 'contribution_date' in df.columns: date_col_std = 'contribution_date'
-    elif 'expenditure_date' in df.columns: date_col_std = 'expenditure_date'
-    elif 'loan_date' in df.columns: date_col_std = 'loan_date'
-
-    if date_col_std:
-        df[date_col_std] = pd.to_datetime(df[date_col_std], errors='coerce')
-
-    # Add metadata
-    df['data_type'] = data_type_label
-    df['source_file'] = file_path.name
-    df['parse_timestamp'] = pd.Timestamp.now().isoformat()
-
-    logger.info(f"Parsed {len(df)} records from {file_path.name}")
-    return df
-
-
-# --- Main Orchestration Function ---
-
-def parse_manual_idaho_finance_data(
-    raw_finance_dir: Path,
-    processed_dir: Path,
-    start_year: int,
-    end_year: int
-) -> bool:
-    """
-    Reads manual Idaho finance CSVs, parses, standardizes, and saves processed data.
-    """
-    logger.info(f"--- Starting Manual Idaho Finance Data Parsing ({start_year}-{end_year}) ---")
-    logger.info(f"Raw data directory: {raw_finance_dir}")
-    logger.info(f"Processed output directory: {processed_dir}")
-
-    if not raw_finance_dir.is_dir():
-        logger.error(f"Raw finance directory not found: {raw_finance_dir}")
+def save_dataframe(df: pd.DataFrame, category_name: str, processed_dir: Path):
+    """Saves a dataframe to a CSV file, logging success or failure."""
+    output_filename = f"idaho_manual_{category_name}.csv"
+    output_path = processed_dir / output_filename
+    try:
+        df.to_csv(output_path, index=False, encoding='utf-8')
+        logger.info(f"Successfully saved '{category_name}' data ({len(df):,} records) to: {output_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving '{category_name}' data to {output_path}: {str(e)}", exc_info=True)
         return False
+
+def process_all_manual_finance(
+    raw_dir: Path = MANUAL_FINANCE_RAW_DIR,
+    processed_dir: Path = MANUAL_FINANCE_PROCESSED_DIR,
+    file_pattern: str = "*.csv"
+) -> bool:
+    """Parses all manual finance files, categorizes them, and saves separate outputs."""
+
+    if not raw_dir.exists():
+        logger.error(f"Raw data directory not found: {raw_dir}")
+        return False
+
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    all_contributions = []
-    all_expenditures = []
-    all_loans = []
-    all_committees = []
-    all_candidates = []
-    # Add lists for other file types if needed (independent expenditures, filed reports)
+    # Initialize lists for each category
+    category_dfs: dict[str, List[pd.DataFrame]] = {
+        "transactions": [],
+        "committees": [],
+        "candidates": [],
+        "report_list": [],
+        "filing_activity": [],
+        "other": []
+    }
 
-    # --- Process Yearly Files ---
-    years = list(range(start_year, end_year + 1))
-    logger.info(f"Processing yearly files for years: {years}...")
-    for year in tqdm(years, desc="Processing Yearly Files"):
-        # Contributions & Loans (assuming combined file naming)
-        contrib_loan_file = raw_finance_dir / f"contribution and loan {year}.csv"
-        if contrib_loan_file.exists():
-            # Placeholder: Need logic to separate contributions and loans if combined
-            # For now, parse as contributions, potential loan data might be miscategorized
-            df_contrib = parse_finance_file(contrib_loan_file, MANUAL_CONTRIBUTION_MAP, 'contribution')
-            if df_contrib is not None: all_contributions.append(df_contrib)
-            # TODO: Add logic to parse loans separately or identify them within this file
+    all_files = list(raw_dir.glob(file_pattern))
+    csv_files = [f for f in all_files if f.suffix.lower() == '.csv']
+
+    logger.info(f"Found {len(csv_files)} CSV files in {raw_dir}")
+
+    if not csv_files:
+        logger.warning(f"No CSV files found in {raw_dir}. Nothing to process.")
+        return True
+
+    # Categorize and parse files
+    for file_path in csv_files:
+        fname = file_path.name.lower()
+        df = None
+        assigned_category = None
+
+        # --- Categorization Logic ---
+        # Order matters slightly - more specific names first if overlap exists
+        if "committeedownload" in fname:
+            assigned_category = "committees"
+            df = parse_generic_csv(file_path, file_type=assigned_category)
+        elif "candidates_2020-2025" in fname: # Specific candidate file name
+             assigned_category = "candidates"
+             df = parse_generic_csv(file_path, file_type=assigned_category)
+        elif "filedreportlistdownload" in fname:
+             assigned_category = "report_list"
+             df = parse_generic_csv(file_path, file_type=assigned_category)
+        elif "campaign finance 2020-2025" in fname: # Specific activity file name
+             assigned_category = "filing_activity"
+             df = parse_generic_csv(file_path, file_type=assigned_category)
+        elif "contribution and loan" in fname or "expenditures" in fname or \
+             "independentexpendituredownload" in fname or \
+             "expendituredownload" in fname or \
+             "contributiondownload" in fname or \
+             "loan&debtdownload" in fname:
+            assigned_category = "transactions"
+            df = parse_transaction_csv(file_path)
         else:
-             logger.debug(f"File not found: {contrib_loan_file.name}")
+            logger.warning(f"Uncategorized file: {file_path.name}. Attempting generic parse as 'other'.")
+            assigned_category = "other"
+            df = parse_generic_csv(file_path, file_type=assigned_category)
 
-        # Expenditures
-        expend_file = raw_finance_dir / f"expenditures {year}.csv"
-        if expend_file.exists():
-            df_expend = parse_finance_file(expend_file, MANUAL_EXPENDITURE_MAP, 'expenditure')
-            if df_expend is not None: all_expenditures.append(df_expend)
-        else:
-            logger.debug(f"File not found: {expend_file.name}")
-
-    # --- Process Other Specific Files ---
-    logger.info("Processing specific download files...")
-    # Example: CommitteeDownload.csv (adapt pattern if filename varies)
-    committee_files = list(raw_finance_dir.glob("CommitteeDownload*.csv"))
-    if committee_files:
-        # Assuming only one committee file, process the first found
-        df_committee = _read_and_clean_csv(committee_files[0])
-        if df_committee is not None:
-            rename_dict = {csv_col: std_col for csv_col, std_col in MANUAL_COMMITTEE_MAP.items() if csv_col in df_committee.columns}
-            df_committee = df_committee.rename(columns=rename_dict)
-            df_committee['source_file'] = committee_files[0].name
-            all_committees.append(df_committee[list(rename_dict.values()) + ['source_file']]) # Keep only mapped + source
-            logger.info(f"Parsed {len(df_committee)} committee records from {committee_files[0].name}")
-    else:
-        logger.warning("No CommitteeDownload*.csv file found.")
-
-    # Example: candidates_2020-2025.csv
-    candidate_file = raw_finance_dir / "candidates_2020-2025.csv"
-    if candidate_file.exists():
-        df_candidate = _read_and_clean_csv(candidate_file)
-        if df_candidate is not None:
-            rename_dict = {csv_col: std_col for csv_col, std_col in MANUAL_CANDIDATE_MAP.items() if csv_col in df_candidate.columns}
-            df_candidate = df_candidate.rename(columns=rename_dict)
-            df_candidate['source_file'] = candidate_file.name
-             # Dates might need parsing: pd.to_datetime(df_candidate['some_date_col'], errors='coerce')
-            all_candidates.append(df_candidate[list(rename_dict.values()) + ['source_file']])
-            logger.info(f"Parsed {len(df_candidate)} candidate records from {candidate_file.name}")
-    else:
-         logger.warning(f"Candidate file not found: {candidate_file.name}")
-
-    # Example: Loan&DebtDownload.csv
-    loan_files = list(raw_finance_dir.glob("Loan&DebtDownload*.csv"))
-    if loan_files:
-         df_loan = parse_finance_file(loan_files[0], MANUAL_LOAN_MAP, 'loan')
-         if df_loan is not None: all_loans.append(df_loan)
-    else:
-         logger.warning("No Loan&DebtDownload*.csv file found.")
-
-    # TODO: Add parsing for other relevant files:
-    # - IndependentExpenditureDownload.csv
-    # - FiledReportListDownload*.csv
-    # - campaign finance 2020-2025.csv (Decide strategy: parse this OR yearly files?)
-
-    # --- Consolidate and Save Processed Data ---
-    logger.info("Consolidating parsed data...")
-    processed_something = False
-
-    # Consolidate contributions
-    if all_contributions:
-        df_contrib_final = pd.concat(all_contributions, ignore_index=True)
-        output_path = processed_dir / f"finance_contributions_manual_ID_{start_year}-{end_year}.csv"
-        logger.info(f"Saving {len(df_contrib_final)} processed contribution records to {output_path}...")
-        df_contrib_final.to_csv(output_path, index=False, encoding='utf-8')
-        processed_something = True
-    else: logger.warning("No contribution data processed.")
-
-    # Consolidate expenditures
-    if all_expenditures:
-        df_expend_final = pd.concat(all_expenditures, ignore_index=True)
-        output_path = processed_dir / f"finance_expenditures_manual_ID_{start_year}-{end_year}.csv"
-        logger.info(f"Saving {len(df_expend_final)} processed expenditure records to {output_path}...")
-        df_expend_final.to_csv(output_path, index=False, encoding='utf-8')
-        processed_something = True
-    else: logger.warning("No expenditure data processed.")
-
-    # Consolidate loans
-    if all_loans:
-        df_loan_final = pd.concat(all_loans, ignore_index=True)
-        output_path = processed_dir / f"finance_loans_manual_ID_{start_year}-{end_year}.csv"
-        logger.info(f"Saving {len(df_loan_final)} processed loan records to {output_path}...")
-        df_loan_final.to_csv(output_path, index=False, encoding='utf-8')
-        processed_something = True
-    else: logger.warning("No loan data processed.")
-
-     # Consolidate committees
-    if all_committees:
-        df_committee_final = pd.concat(all_committees, ignore_index=True)
-        output_path = processed_dir / f"finance_committees_manual_ID_{start_year}-{end_year}.csv"
-        logger.info(f"Saving {len(df_committee_final)} processed committee records to {output_path}...")
-        df_committee_final.to_csv(output_path, index=False, encoding='utf-8')
-        processed_something = True
-    else: logger.warning("No committee data processed.")
-
-    # Consolidate candidates
-    if all_candidates:
-        df_candidate_final = pd.concat(all_candidates, ignore_index=True)
-        output_path = processed_dir / f"finance_candidates_manual_ID_{start_year}-{end_year}.csv"
-        logger.info(f"Saving {len(df_candidate_final)} processed candidate records to {output_path}...")
-        df_candidate_final.to_csv(output_path, index=False, encoding='utf-8')
-        processed_something = True
-    else: logger.warning("No candidate data processed.")
+        # Append DF if parsing was successful
+        if df is not None and assigned_category is not None:
+            category_dfs[assigned_category].append(df)
+        elif df is None:
+             logger.error(f"Parsing failed for file: {file_path.name}")
+             # Consider if a single file failure should halt everything (currently doesn't)
 
 
-    logger.info(f"--- Manual Idaho Finance Parsing Finished ---")
-    return processed_something
+    # Consolidate and save each category
+    overall_success = True
+    for category_name, df_list in category_dfs.items():
+        if not df_list:
+            logger.info(f"No dataframes found for category '{category_name}'. Skipping save.")
+            continue
 
+        logger.info(f"Consolidating {len(df_list)} dataframes for category '{category_name}'...")
+        try:
+            # Concatenate, handling potential schema differences gracefully
+            consolidated_df = pd.concat(df_list, ignore_index=True, sort=False)
 
-# --- Main Execution Block (for standalone testing) ---
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Parse manually acquired Idaho campaign finance CSV files.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+            # --- Further Cleaning/Standardization (Optional per category) ---
+            if category_name == "transactions":
+                cols_to_drop = [
+                    'Timed Report Date_dt',
+                    'Public Distribution Start Date_dt',
+                    'Public Distribution End Date_dt'
+                ]
+                # Drop columns only if they exist, ignore errors if not
+                existing_cols_to_drop = [col for col in cols_to_drop if col in consolidated_df.columns]
+                if existing_cols_to_drop:
+                    consolidated_df.drop(columns=existing_cols_to_drop, inplace=True)
+                    logger.info(f"Dropped unreliable date columns from transactions: {existing_cols_to_drop}")
+
+            # --- Save Processed Data ---
+            if not save_dataframe(consolidated_df, category_name, processed_dir):
+                 overall_success = False # Mark failure if save fails
+
+        except Exception as e:
+            logger.error(f"Error during consolidation for category '{category_name}': {str(e)}", exc_info=True)
+            overall_success = False # Mark failure if consolidation fails
+
+    return overall_success
+
+def parse_arguments():
+    """Parses command-line arguments."""
+    parser = argparse.ArgumentParser(description="Parse manually collected Idaho campaign finance data.")
+    parser.add_argument(
+        "--csv-reports",
+        required=True,
+        help="Path to the CSV file containing campaign finance reports.",
     )
-    parser.add_argument('--start-year', type=int, required=True,
-                        help='Start year for data processing')
-    parser.add_argument('--end-year', type=int, required=True,
-                        help='End year for data processing')
-    parser.add_argument('--data-dir', type=str, default=None,
-                        help='Override base data directory (default: ./data)')
-    # Add other arguments as needed (e.g., specifying input dir more granularly)
+    parser.add_argument(
+        "--csv-candidates",
+        required=True,
+        help="Path to the CSV file containing candidate details.",
+    )
+    parser.add_argument(
+        "--csv-committees",
+        required=False, # Make it optional
+        help="Optional path to the CSV file containing committee details.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="data/processed",
+        help="Directory to save the processed finance data JSON file.",
+    )
+    return parser.parse_args()
 
-    args = parser.parse_args()
-
-    # --- Standalone Setup ---
+def load_csv_reports(csv_path: str) -> List[Dict[str, Any]]:
+    """Loads campaign finance reports from a CSV file, skipping the first line."""
+    reports = []
+    header = []
     try:
-        paths = setup_project_paths(args.data_dir)
-    except SystemExit:
-        sys.exit(1)
+        with open(csv_path, mode='r', encoding='utf-8') as csvfile:
+            reader = csv.reader(csvfile)
+            try:
+                next(reader)  # Skip the first title line
+                header = next(reader)  # Read the actual header row
+            except StopIteration:
+                logging.error(f"CSV file {csv_path} appears to be empty or missing header.")
+                return []
 
-    # Setup logging for this module specifically
-    logger = setup_logging(MANUAL_FINANCE_LOG_FILE, paths['log'])
+            # Use DictReader with the correct header
+            dict_reader = csv.DictReader(csvfile, fieldnames=header)
+            for row in dict_reader:
+                # Basic cleaning/type conversion can be added here if needed
+                reports.append(row)
 
-    # Define input and output directories based on project structure
-    # Expects manual files to be in data/raw/campaign_finance/idaho/
-    raw_finance_dir = paths['raw'] / 'campaign_finance' / 'idaho'
-    processed_dir = paths['processed']
-
-    # --- Run the main parsing logic ---
-    success = False
-    try:
-        success = parse_manual_idaho_finance_data(
-            raw_finance_dir=raw_finance_dir,
-            processed_dir=processed_dir,
-            start_year=args.start_year,
-            end_year=args.end_year
-        )
-
-        if success:
-            print(f"Manual finance parsing finished successfully.")
-            print(f"Processed files saved in: {processed_dir}")
-            exit_code = 0
-        else:
-            print("Manual finance parsing finished, but may not have processed all expected data. Check logs.")
-            exit_code = 1 # Indicate potential issues
-
+        logging.info(f"Successfully loaded {len(reports)} reports from {csv_path}")
+        return reports
+    except FileNotFoundError:
+        logging.error(f"CSV file not found: {csv_path}")
+        return []
     except Exception as e:
-        logger.critical(f"Critical unhandled error during standalone manual finance parsing: {e}", exc_info=True)
-        exit_code = 2
-    finally:
-        logging.shutdown()
-        sys.exit(exit_code) 
+        logging.error(f"Error reading CSV file {csv_path}: {e}")
+        return []
+
+def load_csv_candidates(csv_path: str) -> Dict[str, Dict[str, Any]]:
+    """Loads candidate details from a CSV file, skipping the first line.
+
+    Assumes the second line is the header and uses 'Filing Entity ID' as the key.
+    """
+    candidates_dict = {}
+    header = []
+    # !! IMPORTANT: Verify this is the correct identifier column in candidates CSV !!
+    candidate_id_column = 'Filing Entity ID'
+
+    try:
+        with open(csv_path, mode='r', encoding='utf-8') as csvfile:
+            reader = csv.reader(csvfile)
+            try:
+                next(reader) # Skip the first title line
+                header = next(reader) # Read the actual header row
+                if candidate_id_column not in header:
+                    logging.error(f"Candidate ID column '{candidate_id_column}' not found in header: {header}")
+                    return {}
+            except StopIteration:
+                logging.error(f"CSV file {csv_path} appears to be empty or missing header.")
+                return {}
+
+            # Use DictReader with the correct header
+            # We need to recreate the reader or seek back, easier to iterate from here
+            dict_reader = csv.DictReader(csvfile, fieldnames=header)
+            for row in dict_reader:
+                candidate_id = row.get(candidate_id_column)
+                if candidate_id:
+                    # Clean up potential whitespace
+                    candidate_id = candidate_id.strip()
+                    if candidate_id in candidates_dict:
+                        logging.warning(f"Duplicate candidate ID '{candidate_id}' found in {csv_path}. Overwriting previous entry.")
+                    candidates_dict[candidate_id] = row
+                else:
+                    logging.warning(f"Row missing candidate ID ('{candidate_id_column}') in {csv_path}: {row}")
+
+        logging.info(f"Successfully loaded {len(candidates_dict)} candidate entries from {csv_path}")
+        return candidates_dict
+    except FileNotFoundError:
+        logging.error(f"Candidates CSV file not found: {csv_path}")
+        return {}
+    except Exception as e:
+        logging.error(f"Error reading candidates CSV file {csv_path}: {e}")
+        return {}
+
+def load_csv_committees(csv_path: str) -> Dict[str, Dict[str, Any]]:
+    """Loads committee details from a CSV file, skipping the first line.
+
+    Assumes the second line is the header and uses 'Filing Entity ID' as the key.
+    Returns an empty dict if the file path is None or empty.
+    """
+    if not csv_path:
+        logging.info("No committee CSV path provided. Skipping committee load.")
+        return {}
+
+    committees_dict = {}
+    header = []
+    # !! IMPORTANT: Verify this is the correct identifier column in committees CSV !!
+    committee_id_column = 'Filing Entity ID'
+
+    try:
+        with open(csv_path, mode='r', encoding='utf-8') as csvfile:
+            reader = csv.reader(csvfile)
+            try:
+                next(reader) # Skip the first title line
+                header = next(reader) # Read the actual header row
+                if committee_id_column not in header:
+                    logging.error(f"Committee ID column '{committee_id_column}' not found in header: {header}")
+                    return {}
+            except StopIteration:
+                logging.error(f"Committee CSV file {csv_path} appears to be empty or missing header.")
+                return {}
+
+            dict_reader = csv.DictReader(csvfile, fieldnames=header)
+            for row in dict_reader:
+                committee_id = row.get(committee_id_column)
+                if committee_id:
+                    committee_id = committee_id.strip()
+                    if committee_id in committees_dict:
+                        logging.warning(f"Duplicate committee ID '{committee_id}' found in {csv_path}. Overwriting previous entry.")
+                    committees_dict[committee_id] = row
+                else:
+                    logging.warning(f"Row missing committee ID ('{committee_id_column}') in {csv_path}: {row}")
+
+        logging.info(f"Successfully loaded {len(committees_dict)} committee entries from {csv_path}")
+        return committees_dict
+    except FileNotFoundError:
+        logging.error(f"Committees CSV file not found: {csv_path}")
+        return {}
+    except Exception as e:
+        logging.error(f"Error reading committees CSV file {csv_path}: {e}")
+        return {}
+
+def combine_data(reports: List[Dict[str, Any]], 
+                 candidates: Dict[str, Dict[str, Any]], 
+                 committees: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Combines report data with candidate or committee details.
+
+    Args:
+        reports: A list of dictionaries, where each dictionary represents a report from the CSV.
+        candidates: A dictionary keyed by Filing Entity ID containing candidate details.
+        committees: A dictionary keyed by Filing Entity ID containing committee details.
+
+    Returns:
+        A list of dictionaries, where each dictionary represents a report enriched
+        with corresponding entity (candidate or committee) details.
+    """
+    combined_data = []
+    reports_without_match = 0
+
+    candidate_key_in_reports_csv = 'Filing Entity Id'
+
+    for report in reports:
+        entity_type = 'unknown' # Track if match is candidate or committee
+        details = None
+        candidate_identifier = report.get(candidate_key_in_reports_csv)
+
+        if not candidate_identifier:
+            logging.warning(f"Report missing identifier key ('{candidate_key_in_reports_csv}'): {report.get('ReportName', 'N/A')}")
+            reports_without_match += 1
+            continue
+
+        # Clean identifier before lookup
+        candidate_identifier = candidate_identifier.strip()
+
+        # Try matching with candidates first
+        candidate_details = candidates.get(candidate_identifier)
+        if candidate_details:
+            details = candidate_details
+            entity_type = 'candidate'
+        else:
+            # If no candidate match, try committees (if committee data exists)
+            committee_details = committees.get(candidate_identifier)
+            if committee_details:
+                details = committee_details
+                entity_type = 'committee'
+
+        # Enrich and append if details were found
+        if details:
+            enriched_report = report.copy()
+            enriched_report['entity_details'] = details # Use a generic name
+            enriched_report['entity_type'] = entity_type
+            combined_data.append(enriched_report)
+        else:
+            # Log only if no match was found in either candidates or committees
+            filer_type = report.get('FilerType', 'N/A') # Get FilerType from report for context
+            logging.warning(f"No candidate or committee details found for identifier '{candidate_identifier}' (FilerType: {filer_type}) in report: {report.get('ReportName', 'N/A')}")
+            reports_without_match += 1
+            # Option: could append the report without details if needed
+            # combined_data.append(report)
+
+    logging.info(f"Combined data for {len(combined_data)} reports ({len(combined_data) - reports_without_match} matched).")
+    if reports_without_match > 0:
+        logging.warning(f"{reports_without_match} reports could not be matched with candidate or committee details.")
+
+    return combined_data
+
+def save_processed_data(data: List[Dict[str, Any]], output_dir: str, filename: str = "processed_finance_data.json"):
+    """Saves the processed data to a JSON file."""
+    if not data:
+        logging.warning("No processed data to save.")
+        return
+
+    output_path = os.path.join(output_dir, filename)
+
+    try:
+        os.makedirs(output_dir, exist_ok=True) # Ensure the output directory exists
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        logging.info(f"Successfully saved processed data to {output_path}")
+    except IOError as e:
+        logging.error(f"Error writing JSON file to {output_path}: {e}")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while saving data: {e}")
+
+def main():
+    """Main function to parse and combine finance data."""
+    args = parse_arguments()
+    logging.info(f"Starting manual finance data processing.")
+    logging.info(f"Reading CSV reports from: {args.csv_reports}")
+    logging.info(f"Reading CSV candidates from: {args.csv_candidates}")
+    if args.csv_committees:
+        logging.info(f"Reading CSV committees from: {args.csv_committees}")
+    else:
+        logging.info("No committee CSV provided.")
+
+    # Load data
+    reports_data = load_csv_reports(args.csv_reports)
+    candidates_data = load_csv_candidates(args.csv_candidates)
+    committees_data = load_csv_committees(args.csv_committees) # Load committees (will be {} if path is None)
+
+    # Check only essential data was loaded
+    if not reports_data or not candidates_data:
+        logging.error("Failed to load required reports or candidates data. Exiting.")
+        return
+
+    # Combine data
+    processed_data = combine_data(reports_data, candidates_data, committees_data)
+
+    if not processed_data:
+        logging.warning("No data combined. Check identifiers and input files.")
+        # Decide if processing should stop or continue
+
+    # Save processed data
+    save_processed_data(processed_data, args.output_dir)
+
+    logging.info(f"Manual finance data processing finished.")
+
+if __name__ == "__main__":
+    main()

@@ -20,6 +20,25 @@ if not LEGISCAN_API_KEY:
     print("CRITICAL WARNING: LEGISCAN_API_KEY environment variable not set. LegiScan API calls WILL fail.")
     # raise ValueError("FATAL: LEGISCAN_API_KEY environment variable not set.")
 
+# --- Finance API Configuration ---
+FINANCE_API_KEY = os.environ.get('FINANCE_API_KEY')
+if not FINANCE_API_KEY:
+    print("WARNING: FINANCE_API_KEY environment variable not set. Finance API calls will fail.")
+
+FINANCE_BASE_URL = 'https://api.financedataservice.gov'  # Example URL
+FINANCE_MAX_RETRIES = 5
+FINANCE_DEFAULT_WAIT_SECONDS = 1.2  # Base wait time between API calls
+
+# --- News API Configuration ---
+NEWS_API_KEY = os.environ.get('NEWS_API_KEY')
+if not NEWS_API_KEY:
+    print("WARNING: NEWS_API_KEY environment variable not set. News API calls will fail.")
+
+NEWS_API_URL = 'https://newsapi.org/v2'  # News API endpoint
+NEWS_MAX_RETRIES = 3
+NEWS_DEFAULT_WAIT_SECONDS = 1.5  # Base wait time between API calls
+NEWS_LOG_FILE = 'news_collection.log'
+
 # --- LegiScan API Configuration ---
 LEGISCAN_BASE_URL = 'https://api.legiscan.com/'
 LEGISCAN_MAX_RETRIES = 5
@@ -99,9 +118,9 @@ VOTE_TEXT_MAP = {
 FINANCE_COLUMN_MAPS = {
     'contributions': {
         'donor_name': ['donor name', 'contributor name', 'name', 'from', 'contributor'],
-        'contribution_date': ['date', 'contribution date', 'received date'],
-        'contribution_amount': ['amount', 'contribution amount', '$', 'receipt amount'],
-        'donor_address': ['address', 'donor address', 'contributor address', 'addr 1'],
+        'contribution_date': ['date', 'contribution date', 'received date', 'transaction date'],
+        'contribution_amount': ['amount', 'contribution amount', '$', 'receipt amount', 'transaction amount'],
+        'donor_address': ['address', 'donor address', 'contributor address', 'addr 1', 'contributor address line 1'],
         'donor_city': ['city', 'donor city', 'contributor city'],
         'donor_state': ['state', 'st', 'donor state', 'contributor state'],
         'donor_zip': ['zip', 'zip code', 'donor zip', 'contributor zip'],
@@ -113,11 +132,11 @@ FINANCE_COLUMN_MAPS = {
         'transaction_id': ['transaction id', 'tran id', 'transactionid']
     },
     'expenditures': {
-        'expenditure_date': ['date', 'expenditure date', 'payment date'],
+        'expenditure_date': ['date', 'expenditure date', 'payment date', 'transaction date'],
         'payee_name': ['payee', 'paid to', 'name', 'payee name', 'vendor name'],
-        'expenditure_amount': ['amount', 'expenditure amount', '$', 'payment amount'],
+        'expenditure_amount': ['amount', 'expenditure amount', '$', 'payment amount', 'transaction amount'],
         'expenditure_purpose': ['purpose', 'description', 'expenditure purpose', 'memo'],
-        'payee_address': ['address', 'payee address', 'vendor address', 'addr 1'],
+        'payee_address': ['address', 'payee address', 'vendor address', 'addr 1', 'payee address line 1'],
         'payee_city': ['city', 'payee city', 'vendor city'],
         'payee_state': ['state', 'st', 'payee state', 'vendor state'],
         'payee_zip': ['zip', 'zip code', 'payee zip', 'vendor zip'],

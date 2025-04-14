@@ -204,6 +204,33 @@ def clean_name(name: Optional[str]) -> Optional[str]:
     name = name.strip()
     return name
 
+def clean_text(text: str) -> str:
+    """
+    Clean and normalize text content.
+    
+    Args:
+        text: The text to clean
+        
+    Returns:
+        Cleaned and normalized text
+    """
+    if not text:
+        return ""
+    
+    # Standardize whitespace
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Remove non-printable characters
+    text = re.sub(r'[^\x20-\x7E\n]', '', text)
+    
+    # Remove excessive punctuation repeats
+    text = re.sub(r'([.,!?]){3,}', r'\1\1\1', text)
+    
+    # Trim leading/trailing whitespace
+    text = text.strip()
+    
+    return text
+
 # --- Network Operations ---
 DEFAULT_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
