@@ -262,7 +262,7 @@ This document tracks the tasks required to build and improve the Valley Vote pla
 -   [ ] **Implement Code Quality Checks:** Add linting, formatting, and type checking tools.
 -   [ ] **Create Contributing Guidelines:** Instructions for contributors.
 
-## Recent Updates (Last Updated: May 2024)
+## Recent Updates (Last Updated: April 2025)
 
 -   Created and implemented new data collection modules:
     -   `finance_collection.py` - For campaign finance data collection via API
